@@ -1,0 +1,51 @@
+{
+  "name": "zozul-cli",
+  "version": "0.1.0",
+  "description": "Observability for Claude Code — track token usage, costs, turns, and conversation history",
+  "type": "module",
+  "main": "dist/index.js",
+  "bin": {
+    "zozul": "dist/index.js"
+  },
+  "scripts": {
+    "build": "tsc && cp src/dashboard/index.html dist/dashboard/index.html",
+    "prepare": "npm run build",
+    "dev": "tsx src/index.ts",
+    "start": "node dist/index.js",
+    "test": "vitest run"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/tuesday-coder/zozul-cli.git"
+  },
+  "keywords": [
+    "claude-code",
+    "observability",
+    "telemetry",
+    "opentelemetry"
+  ],
+  "author": "",
+  "license": "Apache-2.0",
+  "bugs": {
+    "url": "https://github.com/tuesday-coder/zozul-cli/issues"
+  },
+  "homepage": "https://github.com/tuesday-coder/zozul-cli#readme",
+  "dependencies": {
+    "@opentelemetry/api": "^1.9.0",
+    "@opentelemetry/exporter-logs-otlp-grpc": "^0.213.0",
+    "@opentelemetry/exporter-metrics-otlp-grpc": "^0.213.0",
+    "@opentelemetry/exporter-prometheus": "^0.213.0",
+    "@opentelemetry/otlp-grpc-exporter-base": "^0.213.0",
+    "@opentelemetry/resources": "^2.6.0",
+    "@opentelemetry/sdk-logs": "^0.213.0",
+    "@opentelemetry/sdk-metrics": "^2.6.0",
+    "@types/better-sqlite3": "^7.6.13",
+    "@types/node": "^25.5.0",
+    "better-sqlite3": "^12.8.0",
+    "commander": "^14.0.3",
+    "dotenv": "^17.3.1",
+    "tsx": "^4.21.0",
+    "typescript": "^6.0.2",
+    "vitest": "^3.2.4"
+  }
+}
