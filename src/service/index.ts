@@ -224,7 +224,7 @@ function installSystemd(env: Record<string, string>): ServiceResult {
     .join("\n");
 
   const unit = `[Unit]
-Description=zozul — Claude Code Observability
+Description=zozul — Agent Observability
 After=network.target
 
 [Service]

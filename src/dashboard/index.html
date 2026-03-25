@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>zozul — Claude Code Observability</title>
+<title>zozul — Agent Observability</title>
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4"></script>
 <style>
   :root {
@@ -96,6 +96,7 @@
     gap: 16px;
     margin-bottom: 28px;
   }
+  .chart-card.full-width { grid-column: 1 / -1; }
   .chart-card {
     background: var(--surface);
     border: 1px solid var(--border);
@@ -359,7 +360,7 @@
 
 <div class="header">
   <h1>zozul</h1>
-  <span class="subtitle">Claude Code Observability</span>
+  <span class="subtitle">Agent Observability</span>
   <div class="header-right">
     <button class="auto-btn" onclick="manualRefresh()" title="Auto-refresh every 10s — click to refresh now">
       <span class="live-dot"></span>
@@ -400,8 +401,7 @@
       <button class="apply-btn" id="apply-custom">Apply</button>
     </div>
     <div class="charts-grid">
-      <div class="chart-card"><h3 id="tokens-label">Token Usage (7d)</h3><canvas id="chart-tokens"></canvas></div>
-      <div class="chart-card"><h3 id="cost-label">Cost USD (7d)</h3><canvas id="chart-cost"></canvas></div>
+      <div class="chart-card full-width"><h3 id="tokens-label">Tokens &amp; Cost (7d)</h3><canvas id="chart-tokens"></canvas></div>
       <div class="chart-card"><h3>Tool Usage</h3><canvas id="chart-tools"></canvas></div>
       <div class="chart-card"><h3>Model Breakdown</h3><canvas id="chart-models"></canvas></div>
     </div>
@@ -553,8 +553,7 @@ async function loadDashboard() {
     renderStats(stats);
     renderSessions(allSessions);
     updateLoadMore();
-    renderTokenChart(tokens);
-    renderCostChart(cost);
+    renderTokenCostChart(tokens, cost);
     renderToolsChart(tools);
     renderModelsChart(models);
   } catch (e) {
@@ -690,34 +689,48 @@ const COLORS = ['#7c6ef0','#4caf50','#42a5f5','#ff9800','#ef5350','#ab47bc','#26
 const TICK = { color: '#8b8fa3', font: { family: '"JetBrains Mono", monospace', size: 10 } };
 const LEGEND = { labels: { color: '#8b8fa3', font: { family: '"JetBrains Mono", monospace', size: 10 } } };
 
-function renderTokenChart(data) {
+function renderTokenCostChart(tokens, cost) {
+  const labels = tokens.map(d => d.timestamp);
+  const costByTs = Object.fromEntries(cost.map(d => [d.timestamp, d.cost]));
   makeChart('chart-tokens', {
-    type: 'line',
-    data: {
-      labels: data.map(d => d.timestamp),
-      datasets: [
-        { label: 'Input',      data: data.map(d => d.input),      borderColor: '#7c6ef0', borderWidth: 2, tension: 0.3, pointRadius: 3 },
-        { label: 'Output',     data: data.map(d => d.output),     borderColor: '#4caf50', borderWidth: 2, tension: 0.3, pointRadius: 3 },
-        { label: 'Cache Read', data: data.map(d => d.cache_read), borderColor: '#42a5f5', borderWidth: 2, tension: 0.3, pointRadius: 3 },
-      ]
-    },
-    options: { responsive: true, plugins: { legend: LEGEND }, scales: { x: { ticks: TICK }, y: { ticks: TICK } } }
-  });
-}
-
-function renderCostChart(data) {
-  makeChart('chart-cost', {
     type: 'bar',
     data: {
-      labels: data.map(d => d.timestamp),
-      datasets: [{ label: 'Cost (USD)', data: data.map(d => d.cost), backgroundColor: 'rgba(255,152,0,0.5)', borderColor: '#ff9800', borderWidth: 1 }]
+      labels,
+      datasets: [
+        { label: 'Cost (USD)', data: labels.map(ts => costByTs[ts] ?? 0),
+          backgroundColor: 'rgba(255,152,0,0.25)', borderColor: '#ff9800', borderWidth: 1,
+          yAxisID: 'yCost', order: 2 },
+        { label: 'Input',  data: tokens.map(d => d.input),
+          type: 'line', borderColor: '#7c6ef0', borderWidth: 2, tension: 0.3, pointRadius: 2,
+          yAxisID: 'yTokens', order: 1 },
+        { label: 'Output', data: tokens.map(d => d.output),
+          type: 'line', borderColor: '#4caf50', borderWidth: 2, tension: 0.3, pointRadius: 2,
+          yAxisID: 'yTokens', order: 1 },
+      ]
     },
     options: {
       responsive: true,
-      plugins: { legend: LEGEND },
+      plugins: {
+        legend: LEGEND,
+        tooltip: {
+          callbacks: {
+            afterLabel: (ctx) => {
+              if (ctx.dataset.label !== 'Output') return undefined;
+              const cr = tokens[ctx.dataIndex]?.cache_read ?? 0;
+              const inp = tokens[ctx.dataIndex]?.input ?? 0;
+              if (cr <= 0) return undefined;
+              const pct = inp + cr > 0 ? Math.round(cr / (inp + cr) * 100) : 0;
+              return `  Cache read: ${cr.toLocaleString()} (${pct}% of input)`;
+            }
+          }
+        }
+      },
       scales: {
-        x: { ticks: TICK },
-        y: { ticks: { ...TICK, callback: v => '$' + v.toFixed(3) } }
+        x:       { ticks: TICK },
+        yTokens: { position: 'left',  ticks: TICK, title: { display: true, text: 'Tokens', color: '#8b8fa3', font: { size: 10 } } },
+        yCost:   { position: 'right', grid: { drawOnChartArea: false },
+                   ticks: { ...TICK, callback: v => '$' + v.toFixed(3) },
+                   title: { display: true, text: 'Cost (USD)', color: '#ff9800', font: { size: 10 } } },
       }
     }
   });
@@ -877,9 +890,7 @@ function setActivePreset(range) {
 }
 
 function updateChartLabels() {
-  const lbl = chartLabel();
-  document.getElementById('tokens-label').textContent = 'Token Usage (' + lbl + ')';
-  document.getElementById('cost-label').textContent = 'Cost USD (' + lbl + ')';
+  document.getElementById('tokens-label').textContent = 'Tokens & Cost (' + chartLabel() + ')';
 }
 
 document.getElementById('range-picker').addEventListener('click', e => {
@@ -938,8 +949,7 @@ async function loadCharts() {
     fetchJson('/api/metrics/tokens?' + qs),
     fetchJson('/api/metrics/cost?' + qs),
   ]);
-  renderTokenChart(tokens);
-  renderCostChart(cost);
+  renderTokenCostChart(tokens, cost);
 }
 
 loadDashboard().then(scheduleAutoRefresh);
