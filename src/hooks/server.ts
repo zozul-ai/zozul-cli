@@ -141,8 +141,12 @@ function handleApiRoute(url: string, repo: SessionRepo, res: http.ServerResponse
   }
 
   if (path === "/api/sessions") {
-    const sessions = repo.listSessions(100);
-    sendJson(res, 200, sessions);
+    const qs = new URL(url, "http://x").searchParams;
+    const limit = Math.min(500, Math.max(1, parseInt(qs.get("limit") ?? "50", 10)));
+    const offset = Math.max(0, parseInt(qs.get("offset") ?? "0", 10));
+    const sessions = repo.listSessions(limit, offset);
+    const total = repo.countSessions();
+    sendJson(res, 200, { sessions, total, limit, offset });
     return;
   }
 

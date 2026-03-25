@@ -85,6 +85,29 @@ export function uninstallService(): { removed: boolean; platform: "macos" | "lin
 }
 
 /**
+ * Restart the running service in-place (kills and relaunches the current process).
+ * Throws if the service is not installed.
+ */
+export function restartService(): void {
+  const platform = detectPlatform();
+
+  if (platform === "macos") {
+    if (!fs.existsSync(PLIST_PATH)) throw new Error("Service is not installed. Run 'zozul install --service' first.");
+    const uid = os.userInfo().uid;
+    execSync(`launchctl kickstart -k gui/${uid}/${LABEL}`, { stdio: "ignore" });
+    return;
+  }
+
+  if (platform === "linux") {
+    if (!fs.existsSync(SYSTEMD_PATH)) throw new Error("Service is not installed. Run 'zozul install --service' first.");
+    execSync("systemctl --user restart zozul", { stdio: "ignore" });
+    return;
+  }
+
+  throw new Error("Service restart is not supported on this platform.");
+}
+
+/**
  * Returns a human-readable status string for the running service.
  */
 export function serviceStatus(): string {

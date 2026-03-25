@@ -42,12 +42,13 @@ open http://localhost:7890/dashboard
 
 `http://localhost:7890/dashboard`
 
-- **Stats bar** — total sessions, tokens, cost, turns at a glance
+- **Stats bar** — sessions, user prompts, interruptions, tokens, and cost at a glance
 - **Token usage chart** — daily input/output/cache token trends with time range controls
 - **Cost chart** — daily spend
 - **Tool usage** — which tools Claude uses most
 - **Model breakdown** — cost and tokens per model
-- **Sessions table** — filterable; click any session for the full conversation with per-turn token counts, expandable tool call inputs/outputs
+- **Sessions table** — paginated (Load More), filterable; click any session for the full conversation with per-turn token counts, expandable tool call inputs/outputs
+- **Auto-refresh** — dashboard polls every 10s automatically; click the Auto button to refresh immediately
 
 ## Commands
 
@@ -58,6 +59,7 @@ open http://localhost:7890/dashboard
 | `zozul install --service` | Configure Claude Code **and** install zozul as a login service (auto-starts) |
 | `zozul uninstall` | Remove zozul config from Claude Code settings |
 | `zozul uninstall --service` | Also stop and remove the background service |
+| `zozul restart` | Restart the background service (picks up new builds) |
 | `zozul service-status` | Show whether the background service is installed and running |
 | `zozul ingest` | Parse all Claude Code session JSONL files into the database |
 | `zozul ingest --force` | Re-ingest sessions that already exist (picks up new turns) |
@@ -163,7 +165,8 @@ CLI flags override `.env` values.
 | Cost (USD) | OTEL | Per-session, per-model |
 | Active time | OTEL | Per-session |
 | Turns / API calls | JSONL | Full content and metadata |
-| User prompts | OTEL events (opt-in) + JSONL | Full text |
+| User prompts | Hooks (`UserPromptSubmit`) + JSONL | Count (aggregate) + full text (per-turn) |
+| Interruptions | Hooks (`Stop`) | Count (aggregate) |
 | Model responses | JSONL only | Full text |
 | Tool calls and results | Hooks + JSONL | Name, input, output |
 | Session lifecycle | Hooks | Start, end, stop events |

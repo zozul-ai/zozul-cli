@@ -231,8 +231,8 @@ All served by `hooks/server.ts` on port 7890.
 | Method | Path | Description |
 |---|---|---|
 | GET | `/dashboard` | Dashboard HTML |
-| GET | `/api/stats` | Aggregate stats from `sessions` table |
-| GET | `/api/sessions` | List sessions (most recent 100) |
+| GET | `/api/stats` | Aggregate stats — sessions, tokens, cost, user prompts, interruptions |
+| GET | `/api/sessions` | Paginated session list — returns `{ sessions, total, limit, offset }` |
 | GET | `/api/sessions/:id` | Single session row |
 | GET | `/api/sessions/:id/turns` | Turns for a session |
 | GET | `/api/metrics/tokens` | Token time-series from `otel_metrics` |
@@ -242,6 +242,8 @@ All served by `hooks/server.ts` on port 7890.
 | POST | `/v1/metrics` | OTLP metrics receiver |
 | POST | `/v1/logs` | OTLP logs receiver |
 | POST | `/hook/:event` | Claude Code hook receiver |
+
+`/api/sessions` accepts `?limit=N` (default 50, max 500) and `?offset=N`. The response envelope `{ sessions, total, limit, offset }` lets the dashboard implement Load More without a separate count query.
 
 Time-series endpoints accept `?range=7d`, `?range=24h`, or `?from=ISO&to=ISO&step=5m`. Step auto-selects based on range if omitted.
 
@@ -256,6 +258,8 @@ Time-series endpoints accept `?range=7d`, `?range=24h`, or `?from=ISO&to=ISO&ste
 
 The service file bakes in the absolute paths to the node binary (`process.execPath`) and the script (`process.argv[1]` resolved). This makes it nvm-safe but means you need to re-run `zozul install --service` if you upgrade node or move the project.
 
+`zozul restart` kills and immediately relaunches the running service (`launchctl kickstart -k` on macOS, `systemctl --user restart` on Linux). Use this after `npm run build` to pick up code changes without reinstalling.
+
 Logs: `~/.zozul/zozul.log`
 
 ---
@@ -266,8 +270,7 @@ Logs: `~/.zozul/zozul.log`
 - **JSONL path decoding is lossy**: hyphens in project directory names decode incorrectly. No fix without changes to Claude Code.
 - **OTEL cost history is unrecoverable**: if zozul wasn't running during a session, cost data for that period is permanently lost.
 - **`tool_uses.success` and `tool_uses.duration_ms` are never populated**: the schema has these columns but nothing writes to them yet.
-- **No pagination on `/api/sessions`**: hardcoded limit of 100.
-- **Dashboard has no auto-refresh**: the Refresh button must be clicked manually.
+- **Session filter is client-side only**: the filter input searches loaded sessions; Load More fetches additional pages.
 
 ---
 
@@ -280,6 +283,6 @@ npm run build        # Compile TypeScript + copy index.html to dist/
 npm test             # Run vitest
 ```
 
-When the service is installed, it runs `dist/index.js` directly. After code changes, `npm run build` then `zozul install --service` (or `launchctl kickstart gui/$(id -u)/com.zozul.serve`) to restart.
+When the service is installed, it runs `dist/index.js` directly. After code changes: `npm run build && zozul restart`.
 
 The DB is at `~/.zozul/zozul.db`. Use `sqlite3 ~/.zozul/zozul.db` for ad-hoc inspection. Use `zozul db-clean` to remove rows with invalid timestamps.

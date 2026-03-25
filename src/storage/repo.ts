@@ -143,10 +143,15 @@ export class SessionRepo {
     `).run(event);
   }
 
-  listSessions(limit = 20, offset = 0): SessionRow[] {
+  listSessions(limit = 50, offset = 0): SessionRow[] {
     return this.db.prepare(`
       SELECT * FROM sessions ORDER BY started_at DESC LIMIT ? OFFSET ?
     `).all(limit, offset) as SessionRow[];
+  }
+
+  countSessions(): number {
+    const row = this.db.prepare(`SELECT COUNT(*) as n FROM sessions`).get() as { n: number };
+    return row.n;
   }
 
   getSession(id: string): SessionRow | undefined {
@@ -174,14 +179,15 @@ export class SessionRepo {
   getAggregateStats() {
     return this.db.prepare(`
       SELECT
-        COUNT(*) as total_sessions,
-        SUM(total_input_tokens) as total_input_tokens,
-        SUM(total_output_tokens) as total_output_tokens,
-        SUM(total_cache_read_tokens) as total_cache_read_tokens,
-        SUM(total_cost_usd) as total_cost_usd,
-        SUM(total_turns) as total_turns,
-        SUM(total_duration_ms) as total_duration_ms
-      FROM sessions
+        (SELECT COUNT(*) FROM sessions) as total_sessions,
+        (SELECT SUM(total_input_tokens)          FROM sessions) as total_input_tokens,
+        (SELECT SUM(total_output_tokens)         FROM sessions) as total_output_tokens,
+        (SELECT SUM(total_cache_read_tokens)     FROM sessions) as total_cache_read_tokens,
+        (SELECT SUM(total_cost_usd)              FROM sessions) as total_cost_usd,
+        (SELECT SUM(total_turns)                 FROM sessions) as total_turns,
+        (SELECT SUM(total_duration_ms)           FROM sessions) as total_duration_ms,
+        (SELECT COUNT(*) FROM hook_events WHERE event_name = 'UserPromptSubmit') as total_user_prompts,
+        (SELECT COUNT(*) FROM hook_events WHERE event_name = 'Stop') as total_interruptions
     `).get();
   }
 

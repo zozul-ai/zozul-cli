@@ -7,7 +7,7 @@ import { installOtelToSettings, uninstallOtelFromSettings, generateOtelShellExpo
 import { ingestAllSessions } from "../parser/ingest.js";
 import { watchSessionFiles } from "../parser/watcher.js";
 import { formatSessionList, formatSessionDetail, formatStats } from "./format.js";
-import { installService, uninstallService, serviceStatus } from "../service/index.js";
+import { installService, uninstallService, serviceStatus, restartService } from "../service/index.js";
 
 function envPort(): string {
   return process.env.ZOZUL_PORT ?? "7890";
@@ -137,6 +137,20 @@ export function buildCli(): Command {
     .description("Show whether the zozul background service is installed and running")
     .action(() => {
       console.log(`Service status: ${serviceStatus()}`);
+    });
+
+  program
+    .command("restart")
+    .description("Restart the zozul background service")
+    .action(() => {
+      try {
+        restartService();
+        console.log("Service restarted.");
+        console.log(`  Status: ${serviceStatus()}`);
+      } catch (err) {
+        console.error(`Restart failed: ${err instanceof Error ? err.message : err}`);
+        process.exit(1);
+      }
     });
 
   program
