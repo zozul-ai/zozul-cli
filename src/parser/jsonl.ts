@@ -9,6 +9,7 @@ import type {
   ToolCallInfo,
   ContentBlock,
 } from "./types.js";
+import { computeTurnCost } from "../pricing/index.js";
 
 const CLAUDE_DIR = path.join(os.homedir(), ".claude");
 const PROJECTS_DIR = path.join(CLAUDE_DIR, "projects");
@@ -91,7 +92,13 @@ export async function parseSessionFile(
     const outputTokens = usage.output_tokens ?? 0;
     const cacheRead = usage.cache_read_input_tokens ?? 0;
     const cacheCreation = usage.cache_creation_input_tokens ?? 0;
-    const costUsd = entry.costUSD ?? 0;
+    const costUsd = entry.costUSD ?? computeTurnCost(
+      msg.model ?? model,
+      inputTokens,
+      outputTokens,
+      cacheRead,
+      cacheCreation,
+    );
     const durationMs = entry.durationMs ?? 0;
 
     totalInputTokens += inputTokens;

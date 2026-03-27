@@ -85,6 +85,7 @@ export class SessionRepo {
         tool_calls = @tool_calls,
         input_tokens = @input_tokens,
         output_tokens = @output_tokens,
+        cost_usd = MAX(cost_usd, @cost_usd),
         duration_ms = MAX(duration_ms, @duration_ms),
         is_real_user = @is_real_user
       RETURNING id
