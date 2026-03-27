@@ -347,6 +347,25 @@
   }
   .apply-btn:hover { opacity: 0.85; }
 
+  .tag-chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    background: var(--surface2);
+    border: 1px solid var(--border);
+    border-radius: 5px;
+    padding: 3px 10px;
+    font-size: 11px;
+    font-family: var(--mono);
+    color: var(--text-dim);
+    cursor: pointer;
+    user-select: none;
+    transition: all 0.15s;
+  }
+  .tag-chip:hover { border-color: var(--accent); color: var(--text); }
+  .tag-chip.selected { background: rgba(124,110,240,0.15); border-color: var(--accent); color: var(--accent-light); }
+  .tag-chip input { display: none; }
+
   :not(button)[title] { cursor: help; }
 
   @media (max-width: 800px) {
@@ -402,8 +421,41 @@
     </div>
     <div class="charts-grid">
       <div class="chart-card full-width"><h3 id="tokens-label">Tokens &amp; Cost (7d)</h3><canvas id="chart-tokens"></canvas></div>
-      <div class="chart-card"><h3>Tool Usage</h3><canvas id="chart-tools"></canvas></div>
-      <div class="chart-card"><h3>Model Breakdown</h3><canvas id="chart-models"></canvas></div>
+    </div>
+    <div class="panel" id="tasks-panel" style="display:none">
+      <div class="panel-header">
+        <span>Tasks <span id="active-context" style="font-weight:400;font-size:11px;font-family:var(--mono)"></span></span>
+        <div style="display:flex;gap:8px;align-items:center">
+          <input class="panel-filter" id="task-search" placeholder="search tags…" oninput="filterTagChips(this.value)" style="width:140px">
+          <select class="panel-filter" id="task-time-range" onchange="onTaskTimeRange()" style="width:100px">
+            <option value="">All time</option>
+            <option value="1h">1h</option>
+            <option value="6h">6h</option>
+            <option value="24h">24h</option>
+            <option value="7d">7d</option>
+            <option value="30d">30d</option>
+          </select>
+        </div>
+      </div>
+      <div style="padding:12px 16px;display:flex;gap:6px;flex-wrap:wrap;border-bottom:1px solid var(--border)" id="task-chips"></div>
+      <div id="task-stats-grid" class="stats-grid" style="padding:16px;margin-bottom:0"></div>
+      <div id="turns-section" style="display:none">
+        <div class="panel-header">
+          <span>Turns <span id="turns-count" style="font-weight:400;font-size:11px;color:var(--text-dim)"></span></span>
+          <div style="display:flex;gap:6px;align-items:center" id="turns-pagination"></div>
+        </div>
+        <table>
+          <thead><tr>
+            <th>Time</th>
+            <th>Prompt</th>
+            <th>Tags</th>
+            <th>Duration</th>
+            <th>Tokens</th>
+            <th>Cost</th>
+          </tr></thead>
+          <tbody id="turns-table"></tbody>
+        </table>
+      </div>
     </div>
     <div class="panel">
       <div class="panel-header">
@@ -438,6 +490,16 @@
     <div class="panel">
       <div class="panel-header">Conversation</div>
       <div id="detail-turns"></div>
+    </div>
+  </div>
+
+  <!-- Turn detail view -->
+  <div id="turn-detail-view" class="session-detail">
+    <button class="back-btn" onclick="showMain()">&#8592; Turns <span style="font-size:10px;margin-left:4px;color:var(--text-dim)">[Esc]</span></button>
+    <div class="stats-grid" id="turn-detail-stats"></div>
+    <div class="panel">
+      <div class="panel-header">Conversation</div>
+      <div id="turn-detail-content"></div>
     </div>
   </div>
 </div>
@@ -537,13 +599,13 @@ async function loadDashboard() {
   const minSpinner = new Promise(r => setTimeout(r, 400));
   try {
     const qs = chartQueryString();
-    const [stats, sessionsResp, tokens, cost, tools, models] = await Promise.all([
+    const [stats, sessionsResp, tokens, cost, tasks, activeCtx] = await Promise.all([
       fetchJson('/api/stats'),
       fetchJson('/api/sessions?limit=' + SESSIONS_PAGE + '&offset=0'),
       fetchJson('/api/metrics/tokens?' + qs),
       fetchJson('/api/metrics/cost?' + qs),
-      fetchJson('/api/metrics/tools'),
-      fetchJson('/api/metrics/models'),
+      fetchJson('/api/tasks'),
+      fetchJson('/api/context'),
     ]);
     // Handle both paginated { sessions, total } and legacy plain-array responses
     const sessionsArr = Array.isArray(sessionsResp) ? sessionsResp : sessionsResp.sessions;
@@ -551,11 +613,10 @@ async function loadDashboard() {
     sessionsTotal = Array.isArray(sessionsResp) ? sessionsArr.length : sessionsResp.total;
     sessionsOffset = allSessions.length;
     renderStats(stats);
+    renderTasks(tasks, activeCtx);
     renderSessions(allSessions);
     updateLoadMore();
     renderTokenCostChart(tokens, cost);
-    renderToolsChart(tools);
-    renderModelsChart(models);
   } catch (e) {
     console.error('load failed', e);
   } finally {
@@ -624,6 +685,262 @@ function renderStats(s) {
       '<div class="value">' + c.value + '</div>' +
     '</div>'
   ).join('');
+}
+
+// ── Tasks ──
+
+let allTasks = [];
+let selectedTags = new Set();
+let taskTurnsOffset = 0;
+const TURNS_PAGE = 10;
+
+function getTaskTimeRange() {
+  const val = document.getElementById('task-time-range').value;
+  if (!val) return {};
+  const now = new Date();
+  const ms = val.endsWith('h') ? parseInt(val) * 3600000 : parseInt(val) * 86400000;
+  return { from: new Date(now.getTime() - ms).toISOString(), to: now.toISOString() };
+}
+
+async function renderTasks(tasks, activeCtx) {
+  const panel = document.getElementById('tasks-panel');
+  const ctxEl = document.getElementById('active-context');
+
+  if (activeCtx && activeCtx.active) {
+    const tags = Array.isArray(activeCtx.active) ? activeCtx.active : [activeCtx.active];
+    ctxEl.innerHTML = tags.map(t =>
+      '<span style="display:inline-block;background:rgba(124,110,240,0.15);color:var(--accent-light);padding:1px 8px;border-radius:4px;margin-left:4px;font-size:11px">' + escHtml(t) + '</span>'
+    ).join('');
+  } else {
+    ctxEl.textContent = '';
+  }
+
+  if (!tasks.length) {
+    panel.style.display = 'none';
+    return;
+  }
+
+  panel.style.display = '';
+  allTasks = tasks;
+  renderTagChips('');
+  await loadTaskData();
+}
+
+function renderTagChips(search) {
+  const chipsEl = document.getElementById('task-chips');
+  const q = search.toLowerCase();
+  const filtered = q ? allTasks.filter(t => t.task.toLowerCase().includes(q)) : allTasks;
+  chipsEl.innerHTML = filtered.map(t => {
+    const sel = selectedTags.has(t.task) ? ' selected' : '';
+    return '<label class="tag-chip' + sel + '" data-tag="' + escHtml(t.task) + '" onclick="toggleTag(this)">' +
+      escHtml(t.task) + ' <span style="color:var(--text-dim);font-size:10px">(' + t.turn_count + ')</span></label>';
+  }).join('');
+}
+
+function filterTagChips(q) { renderTagChips(q); }
+
+function toggleTag(el) {
+  const tag = el.dataset.tag;
+  if (selectedTags.has(tag)) {
+    selectedTags.delete(tag);
+    el.classList.remove('selected');
+  } else {
+    selectedTags.add(tag);
+    el.classList.add('selected');
+  }
+  loadTaskData();
+}
+
+function onTaskTimeRange() { loadTaskData(); }
+
+function taskQueryParams() {
+  const selected = Array.from(selectedTags);
+  const tags = selected.length > 0 ? selected : allTasks.map(t => t.task);
+  const mode = selected.length > 0 ? 'all' : 'any';
+  const { from, to } = getTaskTimeRange();
+  let qs = 'tags=' + tags.map(encodeURIComponent).join(',') + '&mode=' + mode;
+  if (from && to) qs += '&from=' + encodeURIComponent(from) + '&to=' + encodeURIComponent(to);
+  return { qs, tags, label: selected.length === 0 ? 'All tags' : selected.join(' + ') };
+}
+
+async function loadTaskData() {
+  taskTurnsOffset = 0;
+  const { qs, tags, label } = taskQueryParams();
+  if (tags.length === 0) return;
+
+  const selected = Array.from(selectedTags);
+  const fetches = [fetchJson('/api/tasks/stats?' + qs)];
+  // Only fetch turns if specific tags are selected
+  if (selected.length > 0) {
+    fetches.push(fetchJson('/api/tasks/turns?' + qs + '&limit=' + TURNS_PAGE + '&offset=0'));
+  }
+  const [stats, turns] = await Promise.all(fetches);
+
+  renderTaskStats(stats, label);
+  if (selected.length > 0 && turns) {
+    renderTurnsTable(turns, false);
+    taskTurnsOffset = turns.length;
+  } else {
+    document.getElementById('turns-section').style.display = 'none';
+  }
+}
+
+function renderTaskStats(stats, label) {
+  const grid = document.getElementById('task-stats-grid');
+  grid.innerHTML = [
+    { label: 'Selected',           value: '<span style="font-size:13px;font-family:var(--mono)">' + escHtml(label) + '</span>' },
+    { label: 'Total Turns',        value: fmtNum(stats.total_turns) },
+    { label: 'User Interventions', value: fmtNum(stats.user_turns), title: 'Number of real user prompts' },
+    { label: 'Duration',           value: fmtDuration(stats.total_duration_ms), title: 'Total Claude processing time' },
+    { label: 'Input Tokens',       value: fmtNum(stats.total_input_tokens) },
+    { label: 'Output Tokens',      value: fmtNum(stats.total_output_tokens) },
+    { label: 'Cost',               value: fmtCost(stats.total_cost_usd) },
+  ].map(c =>
+    '<div class="stat-card"' + (c.title ? ' title="' + c.title + '"' : '') + '>' +
+      '<div class="label">' + c.label + '</div>' +
+      '<div class="value">' + c.value + '</div>' +
+    '</div>'
+  ).join('');
+}
+
+function renderTurnsTable(turns, append) {
+  const section = document.getElementById('turns-section');
+  const tbody = document.getElementById('turns-table');
+  const countEl = document.getElementById('turns-count');
+  const paginationEl = document.getElementById('turns-pagination');
+
+  if (!turns.length && !append) {
+    section.style.display = 'none';
+    return;
+  }
+
+  section.style.display = '';
+  const page = Math.floor(taskTurnsOffset / TURNS_PAGE);
+  const hasMore = turns.length >= TURNS_PAGE;
+  countEl.textContent = '';
+  paginationEl.innerHTML =
+    (page > 0 ? '<button class="range-btn" onclick="turnsPrevPage()">\u2190 Prev</button>' : '') +
+    '<span style="font-size:11px;color:var(--text-dim);font-family:var(--mono)">Page ' + (page + 1) + '</span>' +
+    (hasMore ? '<button class="range-btn" onclick="turnsNextPage()">Next \u2192</button>' : '');
+
+  const html = turns.map(t => {
+    const tags = t.tags ? t.tags.split(', ').map(tag =>
+      '<span style="display:inline-block;background:rgba(124,110,240,0.12);color:var(--accent-light);padding:0 6px;border-radius:3px;font-size:10px;font-family:var(--mono)">' + escHtml(tag) + '</span>'
+    ).join(' ') : '';
+    const preview = t.content_text ? escHtml(t.content_text.slice(0, 80)) + (t.content_text.length > 80 ? '\u2026' : '') : '\u2014';
+    const tokens = fmtNum((t.block_input_tokens || 0) + (t.block_output_tokens || 0));
+
+    return '<tr class="clickable" onclick="showTurnBlock(' + t.id + ')">' +
+      '<td title="' + fmtAbsolute(t.timestamp) + '" style="white-space:nowrap">' + fmtRelative(t.timestamp) + '</td>' +
+      '<td style="font-family:var(--mono);font-size:12px;max-width:300px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">' + preview + '</td>' +
+      '<td>' + tags + '</td>' +
+      '<td>' + fmtDuration(t.duration_ms) + '</td>' +
+      '<td><span class="badge badge-tokens">' + tokens + '</span></td>' +
+      '<td><span class="badge badge-cost">' + fmtCost(t.block_cost_usd) + '</span></td>' +
+      '</tr>';
+  }).join('');
+
+  if (append) {
+    tbody.innerHTML += html;
+  } else {
+    tbody.innerHTML = html;
+  }
+}
+
+async function showTurnBlock(turnId) {
+  document.getElementById('main-view').style.display = 'none';
+  document.getElementById('detail-view').classList.remove('active');
+  const view = document.getElementById('turn-detail-view');
+  view.classList.add('active');
+
+  const statsEl = document.getElementById('turn-detail-stats');
+  const content = document.getElementById('turn-detail-content');
+  statsEl.innerHTML = '<div class="stat-card" style="grid-column:1/-1"><div class="label">Loading\u2026</div></div>';
+  content.innerHTML = '';
+
+  const block = await fetchJson('/api/turns/' + turnId + '/block');
+  if (!block.length) { content.innerHTML = '<div class="empty">No data</div>'; return; }
+
+  // Aggregate block stats
+  const totalIn = block.reduce((s, t) => s + (t.input_tokens || 0), 0);
+  const totalOut = block.reduce((s, t) => s + (t.output_tokens || 0), 0);
+  const totalCost = block.reduce((s, t) => s + (t.cost_usd || 0), 0);
+  const duration = block[0].duration_ms || 0;
+  const prompt = block[0].content_text ? block[0].content_text.slice(0, 100) : '\u2014';
+
+  statsEl.innerHTML = [
+    { label: 'Prompt', value: '<span style="font-size:13px;font-family:var(--mono)">' + escHtml(prompt) + (block[0].content_text && block[0].content_text.length > 100 ? '\u2026' : '') + '</span>' },
+    { label: 'Turns in Block', value: block.length },
+    { label: 'Duration', value: fmtDuration(duration) },
+    { label: 'Input Tokens', value: fmtNum(totalIn) },
+    { label: 'Output Tokens', value: fmtNum(totalOut) },
+    { label: 'Cost', value: fmtCost(totalCost) },
+  ].map(c =>
+    '<div class="stat-card"><div class="label">' + c.label + '</div><div class="value" style="font-size:14px">' + c.value + '</div></div>'
+  ).join('');
+
+  content.innerHTML = block.map((t, i) => {
+    const roleClass = t.role === 'assistant' ? 'assistant' : 'user';
+    const roleLabel = t.role === 'assistant' ? 'Assistant' : 'User';
+    const meta = [];
+    if (t.input_tokens)  meta.push(fmtNum(t.input_tokens) + ' in');
+    if (t.output_tokens) meta.push(fmtNum(t.output_tokens) + ' out');
+    if (t.cost_usd)      meta.push(fmtCost(t.cost_usd));
+    if (t.duration_ms)   meta.push(fmtDuration(t.duration_ms));
+
+    const text = t.content_text
+      ? '<div class="turn-content">' + escHtml(t.content_text) + '</div>'
+      : '';
+
+    let toolsHtml = '';
+    if (t.tool_calls) {
+      try {
+        const calls = JSON.parse(t.tool_calls);
+        toolsHtml = '<div class="tool-calls">' + calls.map((c, ci) => {
+          const uid = 'tb-' + turnId + '-' + i + '-' + ci;
+          const inputJson = JSON.stringify(c.toolInput, null, 2);
+          const resultHtml = c.toolResult
+            ? '<div class="tool-section-label">Result</div><div class="tool-json">' + escHtml(c.toolResult) + '</div>'
+            : '';
+          return '<div class="tool-call" id="' + uid + '">' +
+            '<div class="tool-call-header" onclick="toggleTool(\'' + uid + '\')">' +
+              '<span class="tool-name">' + escHtml(c.toolName) + '</span>' +
+              '<span class="tool-chevron">&#9658;</span>' +
+            '</div>' +
+            '<div class="tool-body">' +
+              '<div class="tool-section-label">Input</div>' +
+              '<div class="tool-json">' + escHtml(inputJson) + '</div>' +
+              resultHtml +
+            '</div>' +
+          '</div>';
+        }).join('') + '</div>';
+      } catch {}
+    }
+
+    return '<div class="turn">' +
+      '<div class="turn-header">' +
+        '<span class="turn-role ' + roleClass + '">' + roleLabel + '</span>' +
+        (meta.length ? '<span class="turn-meta">' + meta.join(' \u00b7 ') + '</span>' : '') +
+        '<span class="turn-ts" title="' + fmtAbsolute(t.timestamp) + '">' + fmtRelative(t.timestamp) + '</span>' +
+      '</div>' +
+      text +
+      toolsHtml +
+    '</div>';
+  }).join('');
+}
+
+async function turnsNextPage() {
+  taskTurnsOffset += TURNS_PAGE;
+  const { qs } = taskQueryParams();
+  const turns = await fetchJson('/api/tasks/turns?' + qs + '&limit=' + TURNS_PAGE + '&offset=' + taskTurnsOffset);
+  renderTurnsTable(turns, false);
+}
+
+async function turnsPrevPage() {
+  taskTurnsOffset = Math.max(0, taskTurnsOffset - TURNS_PAGE);
+  const { qs } = taskQueryParams();
+  const turns = await fetchJson('/api/tasks/turns?' + qs + '&limit=' + TURNS_PAGE + '&offset=' + taskTurnsOffset);
+  renderTurnsTable(turns, false);
 }
 
 // ── Sessions table ──
@@ -736,39 +1053,6 @@ function renderTokenCostChart(tokens, cost) {
   });
 }
 
-function renderToolsChart(data) {
-  makeChart('chart-tools', {
-    type: 'doughnut',
-    data: {
-      labels: data.map(d => d.tool_name),
-      datasets: [{ data: data.map(d => d.count), backgroundColor: COLORS }]
-    },
-    options: { responsive: true, plugins: { legend: { position: 'right', labels: { ...LEGEND.labels, boxWidth: 10 } } } }
-  });
-}
-
-function renderModelsChart(data) {
-  makeChart('chart-models', {
-    type: 'bar',
-    data: {
-      labels: data.map(d => d.model),
-      datasets: [
-        { label: 'Cost (USD)', data: data.map(d => d.cost),   backgroundColor: 'rgba(255,152,0,0.5)' },
-        { label: 'Tokens',     data: data.map(d => d.tokens), backgroundColor: 'rgba(124,110,240,0.5)', yAxisID: 'y1' },
-      ]
-    },
-    options: {
-      responsive: true,
-      plugins: { legend: LEGEND },
-      scales: {
-        x:  { ticks: TICK },
-        y:  { position: 'left',  ticks: { ...TICK, color: '#ff9800', callback: v => '$' + v.toFixed(3) } },
-        y1: { position: 'right', grid: { drawOnChartArea: false }, ticks: { ...TICK, color: '#7c6ef0' } },
-      }
-    }
-  });
-}
-
 // ── Session detail ──
 
 async function showSession(id) {
@@ -863,6 +1147,7 @@ function toggleTool(uid) {
 
 function showMain() {
   document.getElementById('detail-view').classList.remove('active');
+  document.getElementById('turn-detail-view').classList.remove('active');
   document.getElementById('main-view').style.display = '';
 }
 
@@ -870,8 +1155,10 @@ function showMain() {
 
 document.addEventListener('keydown', e => {
   if (e.key === 'Escape') {
-    const detail = document.getElementById('detail-view');
-    if (detail.classList.contains('active')) showMain();
+    if (document.getElementById('detail-view').classList.contains('active') ||
+        document.getElementById('turn-detail-view').classList.contains('active')) {
+      showMain();
+    }
   }
 });
 

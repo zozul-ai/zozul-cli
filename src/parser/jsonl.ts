@@ -9,6 +9,7 @@ import type {
   ToolCallInfo,
   ContentBlock,
 } from "./types.js";
+import { computeTurnCost } from "../pricing/index.js";
 
 const CLAUDE_DIR = path.join(os.homedir(), ".claude");
 const PROJECTS_DIR = path.join(CLAUDE_DIR, "projects");
@@ -73,6 +74,9 @@ export async function parseSessionFile(
   let totalCostUsd = 0;
   let totalDurationMs = 0;
 
+  // Track whether each entry is a real user prompt or an automatic tool-result
+  const entryIsRealUser: boolean[] = [];
+
   for (const entry of entries) {
     if (!entry.message) continue;
     const msg = entry.message;
@@ -88,7 +92,13 @@ export async function parseSessionFile(
     const outputTokens = usage.output_tokens ?? 0;
     const cacheRead = usage.cache_read_input_tokens ?? 0;
     const cacheCreation = usage.cache_creation_input_tokens ?? 0;
-    const costUsd = entry.costUSD ?? 0;
+    const costUsd = entry.costUSD ?? computeTurnCost(
+      msg.model ?? model,
+      inputTokens,
+      outputTokens,
+      cacheRead,
+      cacheCreation,
+    );
     const durationMs = entry.durationMs ?? 0;
 
     totalInputTokens += inputTokens;
@@ -96,9 +106,11 @@ export async function parseSessionFile(
     totalCacheReadTokens += cacheRead;
     totalCacheCreationTokens += cacheCreation;
     totalCostUsd += costUsd;
-    totalDurationMs += durationMs;
 
     const { text, toolCalls } = extractContent(msg.content);
+
+    const realUser = msg.role === "user" && !entry.sourceToolAssistantUUID;
+    entryIsRealUser.push(realUser);
 
     turns.push({
       turnIndex,
@@ -113,10 +125,42 @@ export async function parseSessionFile(
       model: msg.model ?? null,
       contentText: text,
       toolCalls,
+      isRealUser: realUser,
     });
 
     turnIndex++;
   }
+
+  // Compute processing duration: for each real user prompt, find the last
+  // assistant turn before the next real user prompt. Duration = that gap.
+  // Only assigned to the real user turn (the one that triggered processing).
+  const realUserTurnIndices: number[] = [];
+  for (let i = 0; i < turns.length; i++) {
+    if (entryIsRealUser[i]) realUserTurnIndices.push(i);
+  }
+
+  for (let ri = 0; ri < realUserTurnIndices.length; ri++) {
+    const userIdx = realUserTurnIndices[ri];
+    const nextUserIdx = ri + 1 < realUserTurnIndices.length
+      ? realUserTurnIndices[ri + 1]
+      : turns.length;
+
+    let lastAssistantTs: string | null = null;
+    for (let j = userIdx + 1; j < nextUserIdx; j++) {
+      if (turns[j].role === "assistant") {
+        lastAssistantTs = turns[j].timestamp;
+      }
+    }
+
+    if (lastAssistantTs && turns[userIdx].durationMs === 0) {
+      const userTime = new Date(turns[userIdx].timestamp).getTime();
+      const assistantTime = new Date(lastAssistantTs).getTime();
+      const gap = assistantTime - userTime;
+      if (gap > 0) turns[userIdx].durationMs = gap;
+    }
+  }
+
+  totalDurationMs = turns.reduce((sum, t) => sum + t.durationMs, 0);
 
   return {
     sessionId,

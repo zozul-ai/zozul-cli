@@ -43,6 +43,7 @@ export interface SessionEntry {
   costUSD?: number;
   durationMs?: number;
   isSidechain?: boolean;
+  sourceToolAssistantUUID?: string;
 
   // Summary-specific fields
   summary?: string;
@@ -78,6 +79,7 @@ export interface ParsedTurn {
   model: string | null;
   contentText: string;
   toolCalls: ToolCallInfo[];
+  isRealUser: boolean;
 }
 
 export interface ToolCallInfo {

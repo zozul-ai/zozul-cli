@@ -47,6 +47,7 @@ function migrate(db: Database.Database): void {
       model           TEXT,
       content_text    TEXT,
       tool_calls      TEXT,
+      is_real_user    INTEGER DEFAULT 0,
       UNIQUE(session_id, turn_index)
     );
 
@@ -97,6 +98,17 @@ function migrate(db: Database.Database): void {
     CREATE INDEX IF NOT EXISTS idx_otel_metrics_session ON otel_metrics(session_id);
     CREATE INDEX IF NOT EXISTS idx_otel_events_name ON otel_events(event_name, timestamp);
     CREATE INDEX IF NOT EXISTS idx_otel_events_session ON otel_events(session_id);
+
+    CREATE TABLE IF NOT EXISTS task_tags (
+      id        INTEGER PRIMARY KEY AUTOINCREMENT,
+      turn_id   INTEGER NOT NULL REFERENCES turns(id),
+      task      TEXT NOT NULL,
+      tagged_at TEXT NOT NULL,
+      UNIQUE(turn_id, task)
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_task_tags_task ON task_tags(task);
+    CREATE INDEX IF NOT EXISTS idx_task_tags_turn ON task_tags(turn_id);
   `);
 }
 
@@ -130,4 +142,5 @@ export type TurnRow = {
   model: string | null;
   content_text: string | null;
   tool_calls: string | null;
+  is_real_user: number;
 };

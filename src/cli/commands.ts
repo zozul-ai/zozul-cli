@@ -8,6 +8,8 @@ import { ingestAllSessions } from "../parser/ingest.js";
 import { watchSessionFiles } from "../parser/watcher.js";
 import { formatSessionList, formatSessionDetail, formatStats } from "./format.js";
 import { installService, uninstallService, serviceStatus, restartService } from "../service/index.js";
+import { getActiveContext, setActiveContext, clearActiveContext } from "../context/index.js";
+import { installGitHook, uninstallGitHook } from "../hooks/git.js";
 
 function envPort(): string {
   return process.env.ZOZUL_PORT ?? "7890";
@@ -104,6 +106,16 @@ export function buildCli(): Command {
         console.log("Or install as a background service with: zozul install --service");
       }
 
+      const gitResult = installGitHook();
+      if (gitResult) {
+        if (gitResult.created) {
+          console.log(`Git post-commit hook installed: ${gitResult.path}`);
+          console.log("  (auto-clears task context on commit)");
+        } else {
+          console.log("Git post-commit hook already installed.");
+        }
+      }
+
       console.log("Launch Claude Code normally with: claude");
     });
 
@@ -118,9 +130,12 @@ export function buildCli(): Command {
       const hooksRemoved = uninstallHooksFromSettings({ port });
       const otelRemoved = uninstallOtelFromSettings();
 
+      const gitRemoved = uninstallGitHook();
+
       if (hooksRemoved) console.log("Hooks removed from Claude Code settings.");
       if (otelRemoved) console.log("OTEL config removed from Claude Code settings.");
-      if (!hooksRemoved && !otelRemoved) console.log("Nothing to remove.");
+      if (gitRemoved) console.log("Git post-commit hook removed.");
+      if (!hooksRemoved && !otelRemoved && !gitRemoved) console.log("Nothing to remove.");
 
       if (opts.service) {
         const result = uninstallService();
@@ -157,12 +172,13 @@ export function buildCli(): Command {
     .command("ingest")
     .description("Parse all Claude Code session JSONL files into the local database")
     .option("-f, --force", "Re-ingest sessions that already exist in the database")
+    .option("--no-tag", "Skip tagging turns with the active task context")
     .action(async (opts) => {
       const db = getDb(envDbPath());
       const repo = new SessionRepo(db);
 
       console.log("Scanning for Claude Code session files...");
-      const result = await ingestAllSessions(repo, { force: opts.force });
+      const result = await ingestAllSessions(repo, { force: opts.force, noTag: opts.tag === false });
       console.log(`Ingested: ${result.ingested}  Skipped: ${result.skipped}`);
       db.close();
     });
@@ -220,6 +236,7 @@ export function buildCli(): Command {
       if (opts.session) {
         const id: string = opts.session;
         db.transaction(() => {
+          db.prepare(`DELETE FROM task_tags WHERE turn_id IN (SELECT id FROM turns WHERE session_id = ?)`).run(id);
           for (const table of ["otel_metrics", "otel_events", "hook_events", "tool_uses", "turns"] as const) {
             db.prepare(`DELETE FROM ${table} WHERE session_id = ?`).run(id);
           }
@@ -258,6 +275,51 @@ export function buildCli(): Command {
 
       console.log("\n── OTEL Environment Variables ──\n");
       console.log(generateOtelShellExports({ endpoint: opts.otelEndpoint }));
+    });
+
+  program
+    .command("context [tags...]")
+    .description("Set, view, or clear the active task tags for tagging turns")
+    .option("--clear", "Clear the active task context")
+    .option("--list", "List all tasks that have been used")
+    .action((tags: string[], opts: { clear?: boolean; list?: boolean }) => {
+      if (opts.clear) {
+        clearActiveContext();
+        console.log("Task context cleared.");
+        return;
+      }
+
+      if (opts.list) {
+        const db = getDb(envDbPath());
+        const repo = new SessionRepo(db);
+        const tasks = repo.listTasks();
+        if (tasks.length === 0) {
+          console.log("No tasks found.");
+        } else {
+          for (const t of tasks) {
+            console.log(`  ${t.task}  (${t.turn_count} turns, last tagged: ${t.last_tagged})`);
+          }
+        }
+        db.close();
+        return;
+      }
+
+      if (tags.length > 0) {
+        const ctx = setActiveContext(tags);
+        console.log(`Active tags: ${ctx.active.join(", ")}`);
+        console.log(`  Set at: ${ctx.set_at}`);
+        return;
+      }
+
+      // No arguments: show current context
+      const ctx = getActiveContext();
+      if (ctx?.active && ctx.active.length > 0) {
+        console.log(`Active tags: ${ctx.active.join(", ")}`);
+        console.log(`  Set at: ${ctx.set_at}`);
+      } else {
+        console.log("No active task context.");
+        console.log('Set one with: zozul context "UI" "Feature"');
+      }
     });
 
   return program;

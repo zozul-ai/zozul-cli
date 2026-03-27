@@ -3,6 +3,7 @@ import type { SessionRepo } from "../storage/repo.js";
 import { ingestSessionFile } from "../parser/ingest.js";
 import { handleOtlpMetrics, handleOtlpLogs } from "../otel/receiver.js";
 import { dashboardHtml } from "../dashboard/html.js";
+import { getActiveContext, clearActiveContext } from "../context/index.js";
 
 export interface HookServerOptions {
   port: number;
@@ -123,6 +124,18 @@ async function handleHookEvent(
       }
     }
 
+    // Auto-clear context when Claude runs git commit or git push
+    if (eventName === "PostToolUse" && payload.tool_name === "Bash") {
+      const cmd = payload.tool_input?.command ?? "";
+      if (/\bgit\s+(commit|push)\b/.test(cmd)) {
+        const ctx = getActiveContext();
+        if (ctx?.active && ctx.active.length > 0) {
+          clearActiveContext();
+          if (verbose) log(`  -> cleared task context after: ${cmd.slice(0, 60)}`);
+        }
+      }
+    }
+
     sendJson(res, 200, { ok: true });
   } catch {
     sendJson(res, 400, { error: "Invalid JSON" });
@@ -184,6 +197,75 @@ function handleApiRoute(url: string, repo: SessionRepo, res: http.ServerResponse
 
   if (path === "/api/metrics/models") {
     sendJson(res, 200, repo.getModelBreakdown());
+    return;
+  }
+
+  if (path === "/api/context") {
+    const ctx = getActiveContext();
+    sendJson(res, 200, ctx ?? { active: null });
+    return;
+  }
+
+  if (path === "/api/tasks") {
+    const tasks = repo.listTasks();
+    sendJson(res, 200, tasks);
+    return;
+  }
+
+  if (path === "/api/tasks/stats") {
+    const qs = new URL(url, "http://x").searchParams;
+    const tagsParam = qs.get("tags") ?? "";
+    const tags = tagsParam.split(",").map(t => t.trim()).filter(Boolean);
+    if (tags.length === 0) {
+      sendJson(res, 400, { error: "tags parameter required" });
+      return;
+    }
+    const mode = qs.get("mode") === "any" ? "any" as const : "all" as const;
+    const from = qs.get("from") ?? undefined;
+    const to = qs.get("to") ?? undefined;
+    const stats = repo.getStatsByTasks(tags, mode, from, to);
+    sendJson(res, 200, stats ?? {});
+    return;
+  }
+
+  const turnBlockMatch = path.match(/^\/api\/turns\/(\d+)\/block$/);
+  if (turnBlockMatch) {
+    const turnId = parseInt(turnBlockMatch[1], 10);
+    const block = repo.getTurnBlock(turnId);
+    sendJson(res, 200, block);
+    return;
+  }
+
+  if (path === "/api/tasks/turns") {
+    const qs = new URL(url, "http://x").searchParams;
+    const tagsParam = qs.get("tags") ?? "";
+    const tags = tagsParam ? tagsParam.split(",").map(t => t.trim()).filter(Boolean) : undefined;
+    const mode = qs.get("mode") === "all" ? "all" as const : "any" as const;
+    const from = qs.get("from") ?? undefined;
+    const to = qs.get("to") ?? undefined;
+    const limit = Math.min(200, Math.max(1, parseInt(qs.get("limit") ?? "50", 10)));
+    const offset = Math.max(0, parseInt(qs.get("offset") ?? "0", 10));
+    const turns = repo.getTaggedTurns({ tags, mode, from, to, limit, offset });
+    sendJson(res, 200, turns);
+    return;
+  }
+
+  const taskTurnsMatch = path.match(/^\/api\/tasks\/([^/]+)\/turns$/);
+  if (taskTurnsMatch) {
+    const taskName = decodeURIComponent(taskTurnsMatch[1]);
+    const qs = new URL(url, "http://x").searchParams;
+    const limit = Math.min(500, Math.max(1, parseInt(qs.get("limit") ?? "50", 10)));
+    const offset = Math.max(0, parseInt(qs.get("offset") ?? "0", 10));
+    const turns = repo.getTurnsByTask(taskName, limit, offset);
+    sendJson(res, 200, turns);
+    return;
+  }
+
+  const taskStatsMatch = path.match(/^\/api\/tasks\/([^/]+)\/stats$/);
+  if (taskStatsMatch) {
+    const taskName = decodeURIComponent(taskStatsMatch[1]);
+    const stats = repo.getStatsByTask(taskName);
+    sendJson(res, 200, stats ?? {});
     return;
   }
 
