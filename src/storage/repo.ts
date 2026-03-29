@@ -1,5 +1,5 @@
 import type Database from "better-sqlite3";
-import type { SessionRow, TurnRow } from "./db.js";
+import type { SessionRow, TurnRow, ToolUseRow, HookEventRow, OtelMetricRow, OtelEventRow, TaskTagRow } from "./db.js";
 
 export class SessionRepo {
   constructor(private db: Database.Database) {}
@@ -347,6 +347,12 @@ export class SessionRepo {
     return rows.map(r => r.task);
   }
 
+  getTaskTagsForTurn(turnId: number): TaskTagRow[] {
+    return this.db.prepare(
+      `SELECT * FROM task_tags WHERE turn_id = ? ORDER BY tagged_at ASC`
+    ).all(turnId) as TaskTagRow[];
+  }
+
   getTurnsByTask(task: string, limit = 50, offset = 0): TurnRow[] {
     return this.db.prepare(`
       SELECT t.* FROM turns t
@@ -513,5 +519,83 @@ export class SessionRepo {
       GROUP BY task
       ORDER BY last_tagged DESC
     `).all() as { task: string; turn_count: number; first_tagged: string; last_tagged: string }[];
+  }
+
+  // ── Sync watermarks ──
+
+  getSyncWatermark(tableName: string): number {
+    const row = this.db.prepare(
+      `SELECT last_synced_id FROM sync_watermarks WHERE table_name = ?`
+    ).get(tableName) as { last_synced_id: number } | undefined;
+    return row?.last_synced_id ?? 0;
+  }
+
+  setSyncWatermark(tableName: string, lastSyncedId: number): void {
+    this.db.prepare(`
+      INSERT INTO sync_watermarks (table_name, last_synced_id, last_synced_at)
+      VALUES (?, ?, datetime('now'))
+      ON CONFLICT(table_name) DO UPDATE SET
+        last_synced_id = excluded.last_synced_id,
+        last_synced_at = excluded.last_synced_at
+    `).run(tableName, lastSyncedId);
+  }
+
+  // ── Bulk reads for sync ──
+
+  getUnsyncedSessions(minRowid: number): (SessionRow & { _rowid: number })[] {
+    return this.db.prepare(`
+      SELECT *, rowid as _rowid FROM sessions WHERE rowid > ? ORDER BY rowid ASC
+    `).all(minRowid) as (SessionRow & { _rowid: number })[];
+  }
+
+  getSessionsByIds(ids: string[]): SessionRow[] {
+    if (ids.length === 0) return [];
+    const placeholders = ids.map(() => "?").join(",");
+    return this.db.prepare(
+      `SELECT * FROM sessions WHERE id IN (${placeholders})`
+    ).all(...ids) as SessionRow[];
+  }
+
+  getTurnsAfter(minId: number, limit: number): TurnRow[] {
+    return this.db.prepare(
+      `SELECT * FROM turns WHERE id > ? ORDER BY id ASC LIMIT ?`
+    ).all(minId, limit) as TurnRow[];
+  }
+
+  getToolUsesAfter(minId: number, limit: number): ToolUseRow[] {
+    return this.db.prepare(
+      `SELECT * FROM tool_uses WHERE id > ? ORDER BY id ASC LIMIT ?`
+    ).all(minId, limit) as ToolUseRow[];
+  }
+
+  getHookEventsAfter(minId: number, limit: number): HookEventRow[] {
+    return this.db.prepare(
+      `SELECT * FROM hook_events WHERE id > ? ORDER BY id ASC LIMIT ?`
+    ).all(minId, limit) as HookEventRow[];
+  }
+
+  getOtelMetricsAfter(minId: number, limit: number): OtelMetricRow[] {
+    return this.db.prepare(
+      `SELECT * FROM otel_metrics WHERE id > ? ORDER BY id ASC LIMIT ?`
+    ).all(minId, limit) as OtelMetricRow[];
+  }
+
+  getOtelEventsAfter(minId: number, limit: number): OtelEventRow[] {
+    return this.db.prepare(
+      `SELECT * FROM otel_events WHERE id > ? ORDER BY id ASC LIMIT ?`
+    ).all(minId, limit) as OtelEventRow[];
+  }
+
+  getTaskTagsAfter(minId: number, limit: number): TaskTagRow[] {
+    return this.db.prepare(
+      `SELECT * FROM task_tags WHERE id > ? ORDER BY id ASC LIMIT ?`
+    ).all(minId, limit) as TaskTagRow[];
+  }
+
+  getTurnLookup(): Map<number, { session_id: string; turn_index: number }> {
+    const rows = this.db.prepare(
+      `SELECT id, session_id, turn_index FROM turns`
+    ).all() as { id: number; session_id: string; turn_index: number }[];
+    return new Map(rows.map(r => [r.id, { session_id: r.session_id, turn_index: r.turn_index }]));
   }
 }

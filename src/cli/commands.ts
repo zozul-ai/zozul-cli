@@ -10,6 +10,9 @@ import { formatSessionList, formatSessionDetail, formatStats } from "./format.js
 import { installService, uninstallService, serviceStatus, restartService } from "../service/index.js";
 import { getActiveContext, setActiveContext, clearActiveContext } from "../context/index.js";
 import { installGitHook, uninstallGitHook } from "../hooks/git.js";
+import { runSync } from "../sync/index.js";
+import { ZozulApiClient } from "../sync/client.js";
+import { remoteDashboardHtml } from "../dashboard/html.js";
 
 function envPort(): string {
   return process.env.ZOZUL_PORT ?? "7890";
@@ -320,6 +323,87 @@ export function buildCli(): Command {
         console.log("No active task context.");
         console.log('Set one with: zozul context "UI" "Feature"');
       }
+    });
+
+  program
+    .command("sync")
+    .description("Sync local data to the remote zozul backend")
+    .option("--dry-run", "Show what would be synced without sending data")
+    .option("-v, --verbose", "Print detailed progress")
+    .action(async (opts) => {
+      const apiUrl = process.env.ZOZUL_API_URL;
+      const apiKey = process.env.ZOZUL_API_KEY;
+
+      if (!apiUrl || !apiKey) {
+        console.error("Missing required environment variables:");
+        if (!apiUrl) console.error("  ZOZUL_API_URL — base URL of the zozul backend");
+        if (!apiKey) console.error("  ZOZUL_API_KEY — API key for authentication");
+        console.error("\nSet them in .env or export them in your shell.");
+        process.exit(1);
+      }
+
+      const db = getDb(envDbPath());
+      const repo = new SessionRepo(db);
+      const client = new ZozulApiClient({ apiUrl, apiKey });
+
+      if (opts.dryRun) {
+        console.log(`Dry run — checking what would sync to ${apiUrl}...\n`);
+      } else {
+        console.log(`Syncing to ${apiUrl}...\n`);
+      }
+
+      const result = await runSync(repo, client, {
+        verbose: opts.verbose || envVerbose(),
+        dryRun: opts.dryRun,
+      });
+
+      console.log("── Sync Summary ──");
+      const label = opts.dryRun ? "pending" : "synced";
+      for (const [table, counts] of Object.entries(result)) {
+        const status = counts.failed > 0 ? "PARTIAL" : "OK";
+        console.log(`  ${table.padEnd(15)} ${counts.synced} ${label}, ${counts.failed} failed  [${status}]`);
+      }
+
+      const totalFailed = Object.values(result).reduce((s, c) => s + c.failed, 0);
+      if (totalFailed > 0) {
+        console.error(`\n${totalFailed} items failed to sync. Re-run 'zozul sync' to retry.`);
+        db.close();
+        process.exit(1);
+      }
+
+      db.close();
+    });
+
+  program
+    .command("dashboard")
+    .description("Open a local dashboard backed by the remote zozul backend")
+    .option("-p, --port <port>", "Port to serve the dashboard on", "3333")
+    .action(async (opts) => {
+      const apiUrl = process.env.ZOZUL_API_URL;
+      const apiKey = process.env.ZOZUL_API_KEY;
+
+      if (!apiUrl || !apiKey) {
+        console.error("Missing required environment variables:");
+        if (!apiUrl) console.error("  ZOZUL_API_URL — base URL of the zozul backend");
+        if (!apiKey) console.error("  ZOZUL_API_KEY — API key for authentication");
+        console.error("\nSet them in .env or export them in your shell.");
+        process.exit(1);
+      }
+
+      const port = parseInt(opts.port, 10);
+      const html = remoteDashboardHtml(apiUrl, apiKey);
+
+      const { createServer } = await import("node:http");
+      const server = createServer((_, res) => {
+        res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
+        res.end(html);
+      });
+
+      server.listen(port, () => {
+        console.log(`Dashboard: http://localhost:${port}`);
+        console.log(`Backend:   ${apiUrl}`);
+        console.log("\nPress Ctrl+C to stop.");
+      });
     });
 
   return program;

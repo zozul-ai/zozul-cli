@@ -109,6 +109,12 @@ function migrate(db: Database.Database): void {
 
     CREATE INDEX IF NOT EXISTS idx_task_tags_task ON task_tags(task);
     CREATE INDEX IF NOT EXISTS idx_task_tags_turn ON task_tags(turn_id);
+
+    CREATE TABLE IF NOT EXISTS sync_watermarks (
+      table_name    TEXT PRIMARY KEY,
+      last_synced_id INTEGER NOT NULL DEFAULT 0,
+      last_synced_at TEXT
+    );
   `);
 }
 
@@ -143,4 +149,50 @@ export type TurnRow = {
   content_text: string | null;
   tool_calls: string | null;
   is_real_user: number;
+};
+
+export type ToolUseRow = {
+  id: number;
+  session_id: string;
+  turn_id: number | null;
+  tool_name: string;
+  tool_input: string | null;
+  tool_result: string | null;
+  success: number | null;
+  duration_ms: number;
+  timestamp: string;
+};
+
+export type HookEventRow = {
+  id: number;
+  session_id: string | null;
+  event_name: string;
+  timestamp: string;
+  payload: string;
+};
+
+export type OtelMetricRow = {
+  id: number;
+  name: string;
+  value: number;
+  attributes: string | null;
+  session_id: string | null;
+  model: string | null;
+  timestamp: string;
+};
+
+export type OtelEventRow = {
+  id: number;
+  event_name: string;
+  attributes: string | null;
+  session_id: string | null;
+  prompt_id: string | null;
+  timestamp: string;
+};
+
+export type TaskTagRow = {
+  id: number;
+  turn_id: number;
+  task: string;
+  tagged_at: string;
 };

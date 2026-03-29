@@ -2,7 +2,7 @@ import http from "node:http";
 import type { SessionRepo } from "../storage/repo.js";
 import { ingestSessionFile } from "../parser/ingest.js";
 import { handleOtlpMetrics, handleOtlpLogs } from "../otel/receiver.js";
-import { dashboardHtml } from "../dashboard/html.js";
+import { dashboardHtml, dashboardHtmlWithToggle } from "../dashboard/html.js";
 import { getActiveContext, clearActiveContext } from "../context/index.js";
 
 export interface HookServerOptions {
@@ -54,8 +54,13 @@ export function createHookServer(opts: HookServerOptions): http.Server {
 
       // ── Dashboard ──
       if (method === "GET" && (url === "/dashboard" || url === "/")) {
+        const apiUrl = process.env.ZOZUL_API_URL;
+        const apiKey = process.env.ZOZUL_API_KEY;
+        const html = apiUrl && apiKey
+          ? dashboardHtmlWithToggle({ apiUrl, apiKey }, "local")
+          : dashboardHtml();
         res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
-        res.end(dashboardHtml());
+        res.end(html);
         return;
       }
 
