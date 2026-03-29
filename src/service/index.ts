@@ -178,7 +178,10 @@ ${envEntries}
 \t<key>RunAtLoad</key>
 \t<true/>
 \t<key>KeepAlive</key>
-\t<true/>
+\t<dict>
+\t\t<key>SuccessfulExit</key>
+\t\t<false/>
+\t</dict>
 \t<key>StandardOutPath</key>
 \t<string>${LOG_PATH}</string>
 \t<key>StandardErrorPath</key>

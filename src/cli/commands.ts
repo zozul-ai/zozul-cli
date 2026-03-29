@@ -50,6 +50,16 @@ export function buildCli(): Command {
       const repo = new SessionRepo(db);
       const server = createHookServer({ port, repo, verbose });
 
+      server.on("error", (err: NodeJS.ErrnoException) => {
+        if (err.code === "EADDRINUSE") {
+          console.error(`Port ${port} is already in use. Is zozul already running?`);
+          console.error("  Check with: lsof -ti :" + port);
+          db.close();
+          process.exit(0); // clean exit so launchd/systemd won't respawn
+        }
+        throw err;
+      });
+
       server.listen(port, async () => {
         console.log(`zozul listening on http://localhost:${port}`);
         console.log(`  Dashboard:     http://localhost:${port}/dashboard`);
