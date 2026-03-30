@@ -1,5 +1,5 @@
 node_modules/
-dist/*.tsbuildinfo
+dist/
 *.db
 *.db-journal
 .env
