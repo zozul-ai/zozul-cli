@@ -199,6 +199,7 @@ function migrate(db: Database.Database): void {
     ["approach", "TEXT"],
     ["dead_ends", "TEXT"],
     ["learnings", "TEXT"],
+    ["tool_frequency", "TEXT"],
   ];
   for (const [col, type] of newSegCols) {
     if (!segCols.includes(col)) {
@@ -334,6 +335,7 @@ export type WorkSegmentRow = {
   dead_ends: string | null;       // JSON array
   learnings: string | null;       // JSON array
   tags: string | null;            // JSON array
+  tool_frequency: string | null;  // JSON object {toolName: count}
   classifier_model: string | null;
   classifier_input_tokens: number;
   classifier_output_tokens: number;

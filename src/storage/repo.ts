@@ -627,12 +627,14 @@ export class SessionRepo {
         commit_sha, commit_message, project_path, changed_files,
         from_timestamp, to_timestamp, turn_count,
         summary, narrative, type, area, components, approach, dead_ends, learnings, tags,
+        tool_frequency,
         classifier_model, classifier_input_tokens, classifier_output_tokens, classifier_cost_usd,
         created_at
       ) VALUES (
         @commit_sha, @commit_message, @project_path, @changed_files,
         @from_timestamp, @to_timestamp, @turn_count,
         @summary, @narrative, @type, @area, @components, @approach, @dead_ends, @learnings, @tags,
+        @tool_frequency,
         @classifier_model, @classifier_input_tokens, @classifier_output_tokens, @classifier_cost_usd,
         @created_at
       )
@@ -640,6 +642,7 @@ export class SessionRepo {
         summary = @summary, narrative = @narrative,
         type = @type, area = @area, components = @components,
         approach = @approach, dead_ends = @dead_ends, learnings = @learnings, tags = @tags,
+        tool_frequency = @tool_frequency,
         turn_count = @turn_count,
         classifier_model = @classifier_model,
         classifier_input_tokens = @classifier_input_tokens,

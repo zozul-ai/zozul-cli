@@ -370,6 +370,64 @@ Source: `src/context/index.ts` (context read/write), `src/hooks/git.ts` (hook in
 
 ---
 
+## Tagging system — design direction
+
+### The problem with the current approach
+
+Both manual context tags (`zozul context`) and AI-generated classifier tags (commit-level `work_segments.tags`, future block-level `block_classifications`) create tags independently with no coordination. This produces:
+
+- **Tag explosion**: every classification run invents new strings. "dashboard", "Dashboard", "ui", "frontend-ui" all mean the same thing but are counted separately.
+- **No reuse**: the same concept gets different labels across sessions, making aggregation meaningless.
+- **No compounding value**: tags don't get more useful over time because there's no shared vocabulary.
+
+### The direction: tags as a knowledge graph
+
+Tags should be **reusable nodes in a shared vocabulary** rather than free-form strings generated fresh each time. Every time a new classification happens (commit, block, or manual), the LLM sees the existing tag universe and decides:
+- **Reuse an existing tag** if the concept is already captured
+- **Create a new tag** only if it represents something genuinely new, and that new tag becomes part of the shared vocabulary going forward
+
+This is how a codebase's knowledge graph naturally evolves: it starts sparse, converges on stable terms, and becomes progressively more useful as the vocabulary matures.
+
+### Implementation approach
+
+**At classification time**, before building the prompt:
+1. Query `task_tags` for the top-N most-used tags (e.g. top 50 by turn count)
+2. Include them in the prompt: *"Existing tags in this project's vocabulary (prefer reusing these): [dashboard, storage, classifier, git-hooks, sqlite-migration, ...]"*
+3. LLM returns tags from the existing set where applicable, proposes new ones only where needed
+4. New tags enter the vocabulary and get used in future classifications
+
+The top-N approach handles scale naturally: early on (few tags), the LLM sees the full vocabulary; as it grows, only the most-established tags are shown, anchoring new classifications to the core ontology while still allowing the vocabulary to expand at the edges.
+
+### What tags should look like
+
+Start flat — no enforced prefixes or hierarchy. Let structure emerge from usage. Natural categories will self-organize:
+
+- **Components**: `dashboard`, `storage`, `classifier`, `sync`, `hooks`, `parser`
+- **Technologies**: `sqlite`, `typescript`, `haiku`, `otel`, `docker`, `ecs`
+- **Patterns**: `migration`, `deduplication`, `watermark`, `batch-processing`, `upsert`
+- **Cross-cutting**: `performance`, `reliability`, `dx`, `cost-tracking`, `auth`
+
+Avoid encoding work type (`bugfix`, `feature`) as tags — those belong in the structured `type` field of `work_segments` / `block_classifications` where they can be filtered precisely. Tags should represent *what* the work touched, not *what kind* of work it was.
+
+### Integration with existing tag sources
+
+All three tag sources (`zozul context`, commit classifier, block classifier) write to the same `task_tags` table. Unification means:
+- Dashboard filtering and cost rollup works across all sources without changes
+- The tag vocabulary is shared — a tag set manually for a session reinforces the same node that the classifier would produce for similar future work
+- Backend sync remains unchanged
+
+A `source` column (`'manual'` | `'classifier'`) could be added later for provenance, but isn't needed for the core vocabulary mechanic.
+
+### Open questions and future directions
+
+- **Tag relationships**: should tags have explicit parent/child or synonym relationships? Probably not in v1 — let frequency be the signal. Tags that appear together often are implicitly related.
+- **Tag merging**: when the vocabulary drifts (e.g. "auth" and "authentication" coexist), a periodic consolidation step could prompt the LLM to merge near-duplicates.
+- **Embeddings**: a richer approach would embed each tag and use similarity to detect near-duplicates at write time. Useful at scale (hundreds of tags) but overkill now.
+- **Manual tag suggestions**: `zozul context` could show existing tags as suggestions before the user types, nudging toward reuse.
+- **Tag frequency floor**: tags used fewer than N times could be excluded from the vocabulary shown to the LLM, preventing low-signal tags from anchoring future classifications.
+
+---
+
 ## Known limitations
 
 - **No schema migrations**: `db.ts` uses `CREATE TABLE IF NOT EXISTS`. Adding columns to existing tables requires manual SQL or a proper migration system.

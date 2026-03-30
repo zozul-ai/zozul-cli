@@ -54,9 +54,7 @@ function getCommitInfo(cwd: string): CommitInfo {
   try {
     changedFiles = execSync("git diff HEAD~1 HEAD --name-only", { cwd, encoding: "utf-8" })
       .trim().split("\n").filter(Boolean);
-    // Get the actual diff, capped at 8000 chars to keep tokens manageable
-    const rawDiff = execSync("git diff HEAD~1 HEAD", { cwd, encoding: "utf-8" });
-    diff = rawDiff.length > 8000 ? rawDiff.slice(0, 8000) + "\n... (truncated)" : rawDiff;
+    diff = execSync("git diff HEAD~1 HEAD", { cwd, encoding: "utf-8" });
   } catch {
     // First commit or shallow clone — skip
   }
@@ -108,7 +106,7 @@ function formatToolInput(toolName: string, input: Record<string, unknown>): stri
     case "Edit":
       return String(input.file_path ?? input.path ?? "");
     case "Bash":
-      return String(input.command ?? "").slice(0, 200);
+      return String(input.command ?? "");
     case "Grep":
       return `"${String(input.pattern ?? "")}"${input.path ? ` in ${String(input.path)}` : ""}`;
     case "Glob":
@@ -118,8 +116,49 @@ function formatToolInput(toolName: string, input: Record<string, unknown>): stri
     case "WebFetch":
       return String(input.url ?? "");
     default:
-      return JSON.stringify(input).slice(0, 120);
+      return JSON.stringify(input);
   }
+}
+
+// Marker that identifies our own classifier prompts so we can skip those turns
+const CLASSIFIER_MARKER = "You are documenting a block of AI-assisted engineering work";
+
+function computeSessionStats(turns: TurnRow[]): {
+  totalCostUsd: number;
+  totalInputTokens: number;
+  totalOutputTokens: number;
+  durationMs: number;
+} {
+  let totalCostUsd = 0;
+  let totalInputTokens = 0;
+  let totalOutputTokens = 0;
+
+  for (const t of turns) {
+    totalCostUsd += t.cost_usd ?? 0;
+    totalInputTokens += t.input_tokens ?? 0;
+    totalOutputTokens += t.output_tokens ?? 0;
+  }
+
+  const timestamps = turns.map(t => new Date(t.timestamp).getTime()).filter(n => !isNaN(n));
+  const durationMs = timestamps.length >= 2
+    ? Math.max(...timestamps) - Math.min(...timestamps)
+    : 0;
+
+  return { totalCostUsd, totalInputTokens, totalOutputTokens, durationMs };
+}
+
+export function computeToolFrequency(turns: TurnRow[]): Record<string, number> {
+  const freq: Record<string, number> = {};
+  for (const t of turns) {
+    if (!t.tool_calls) continue;
+    try {
+      const calls = JSON.parse(t.tool_calls) as { toolName: string }[];
+      for (const c of calls) {
+        freq[c.toolName] = (freq[c.toolName] ?? 0) + 1;
+      }
+    } catch { /* skip */ }
+  }
+  return freq;
 }
 
 function buildPrompt(commit: CommitInfo, turns: TurnRow[]): string {
@@ -136,6 +175,14 @@ function buildPrompt(commit: CommitInfo, turns: TurnRow[]): string {
   lines.push(`Message:\n${commit.message}`);
   lines.push("");
 
+  // ── Session stats ──
+  const stats = computeSessionStats(turns);
+  const durationMin = Math.round(stats.durationMs / 60_000);
+  lines.push("## Session Stats");
+  lines.push(`  Turns: ${turns.length}  Duration: ~${durationMin}m  Cost: $${stats.totalCostUsd.toFixed(4)}`);
+  lines.push(`  Tokens: ${stats.totalInputTokens} in / ${stats.totalOutputTokens} out`);
+  lines.push("");
+
   if (commit.diff) {
     lines.push("## Code Changes (git diff)");
     lines.push(commit.diff);
@@ -146,24 +193,28 @@ function buildPrompt(commit: CommitInfo, turns: TurnRow[]): string {
     lines.push("");
   }
 
-  // ── Interaction log ──
-  lines.push(`## Interaction Log (${turns.length} turns)`);
+  // ── Interaction log — skip turns that are the classifier's own prompts ──
+  const workTurns = turns.filter(t =>
+    !(t.is_real_user && (t.content_text ?? "").trimStart().startsWith(CLASSIFIER_MARKER))
+  );
+
+  lines.push(`## Interaction Log (${workTurns.length} turns)`);
   lines.push("");
 
   let i = 0;
-  while (i < turns.length) {
-    const turn = turns[i];
+  while (i < workTurns.length) {
+    const turn = workTurns[i];
 
     if (turn.is_real_user) {
       const text = (turn.content_text ?? "").trim();
-      if (text) lines.push(`User: "${text.slice(0, 500)}"`);
+      if (text) lines.push(`User: "${text}"`);
       i++;
 
       const toolCalls: string[] = [];
       const reasoning: string[] = [];
 
-      while (i < turns.length && !turns[i].is_real_user) {
-        const t = turns[i];
+      while (i < workTurns.length && !workTurns[i].is_real_user) {
+        const t = workTurns[i];
         if (t.role === "assistant") {
           if (t.tool_calls) {
             try {
@@ -174,7 +225,7 @@ function buildPrompt(commit: CommitInfo, turns: TurnRow[]): string {
             } catch { /* skip */ }
           }
           const txt = (t.content_text ?? "").trim();
-          if (txt) reasoning.push(txt.slice(0, 400));
+          if (txt) reasoning.push(txt);
         }
         i++;
       }
@@ -193,7 +244,7 @@ function buildPrompt(commit: CommitInfo, turns: TurnRow[]): string {
 
   // ── Output schema ──
   lines.push("## Your Task");
-  lines.push(`Produce a JSON document capturing what happened in this work session. Be specific and detailed.`);
+  lines.push("Produce a JSON document capturing what happened in this work session. Be specific and detailed.");
   lines.push("");
   lines.push("Fields:");
   lines.push('  "summary": 2-4 sentences. What was the goal, what approach was taken, what was the outcome.');
@@ -205,9 +256,10 @@ function buildPrompt(commit: CommitInfo, turns: TurnRow[]): string {
   lines.push('  "approach": One sentence on the technical approach or strategy used');
   lines.push('  "dead_ends": Array of approaches tried that did not work, with brief reason why');
   lines.push('  "learnings": Array of non-obvious insights, discoveries, or gotchas uncovered during the work');
-  lines.push('  "tags": Array of 3-8 semantic tags. Use specific technical terms, not generic words.');
-  lines.push('          Good examples: "sqlite-migration", "timestamp-normalization", "git-hooks", "haiku", "otel"');
-  lines.push('          Avoid: "code", "fix", "work", "session", "claude"');
+  lines.push('  "tags": Array of semantic tags capturing what was touched. Use specific technical terms.');
+  lines.push('          Examples: "sqlite-migration", "timestamp-normalization", "git-hooks", "haiku", "otel"');
+  lines.push('          Avoid generic words: "code", "fix", "work", "session", "claude"');
+  lines.push('          Use as many tags as accurately describe the work — no upper limit.');
   lines.push("");
   lines.push("Return ONLY valid JSON, no markdown fences, no prose before or after:");
   lines.push(`{
@@ -331,7 +383,10 @@ export async function classifyCommit(
 
   if (opts.verbose) process.stderr.write(`[classifier] found ${turns.length} turns in window\n`);
 
-  // 3. Build prompt and run classifier
+  // 3. Compute tool frequency mechanically before building prompt
+  const toolFrequency = computeToolFrequency(turns);
+
+  // 4. Build prompt and run classifier
   const prompt = buildPrompt(commit, turns);
   let claudeOut: ClaudeOutput;
   try {
@@ -381,6 +436,7 @@ export async function classifyCommit(
     dead_ends: JSON.stringify(dead_ends),
     learnings: JSON.stringify(learnings),
     tags: JSON.stringify(tags),
+    tool_frequency: JSON.stringify(toolFrequency),
     classifier_model: claudeOut.model,
     classifier_input_tokens: claudeOut.inputTokens,
     classifier_output_tokens: claudeOut.outputTokens,
