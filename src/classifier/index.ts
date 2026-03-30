@@ -1,6 +1,10 @@
 import { execSync, spawnSync } from "node:child_process";
+import fs from "node:fs";
+import path from "node:path";
+import os from "node:os";
 import type { SessionRepo } from "../storage/repo.js";
 import type { TurnRow } from "../storage/db.js";
+import { ingestSessionFile } from "../parser/ingest.js";
 
 export interface ClassifyCommitOptions {
   verbose?: boolean;
@@ -52,6 +56,42 @@ function getCommitInfo(cwd: string): CommitInfo {
   }
 
   return { sha, message, timestamp, prevTimestamp, changedFiles };
+}
+
+/**
+ * Find and ingest session files for the given project that were modified
+ * within the last 24 hours. This catches the live session at commit time.
+ */
+async function ingestRecentSessions(
+  repo: SessionRepo,
+  cwd: string,
+  _toTimestamp: string,
+  verbose?: boolean,
+): Promise<void> {
+  const projectsDir = path.join(os.homedir(), ".claude", "projects");
+  if (!fs.existsSync(projectsDir)) return;
+
+  // Encode the cwd to find the matching project directory
+  const encodedCwd = cwd.replace(/\//g, "-");
+  const projectDir = path.join(projectsDir, encodedCwd);
+  if (!fs.existsSync(projectDir)) return;
+
+  const cutoff = Date.now() - 24 * 3_600_000;
+  const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\.jsonl$/i;
+
+  for (const file of fs.readdirSync(projectDir)) {
+    if (!UUID_RE.test(file)) continue;
+    const filePath = path.join(projectDir, file);
+    const mtime = fs.statSync(filePath).mtimeMs;
+    if (mtime < cutoff) continue;
+
+    try {
+      await ingestSessionFile(repo, filePath, cwd, { noTag: true });
+      if (verbose) process.stderr.write(`[classifier] ingested: ${file}\n`);
+    } catch (err) {
+      if (verbose) process.stderr.write(`[classifier] ingest failed for ${file}: ${err}\n`);
+    }
+  }
 }
 
 function formatToolInput(toolName: string, input: Record<string, unknown>): string {
@@ -228,14 +268,24 @@ export async function classifyCommit(
 
   if (opts.verbose) {
     process.stderr.write(`[classifier] commit ${commit.sha.slice(0, 12)}: ${commit.message}\n`);
-    process.stderr.write(`[classifier] window: ${commit.prevTimestamp ?? "beginning"} → ${commit.timestamp}\n`);
+    const fromUtc = new Date(commit.prevTimestamp ?? 0).toISOString();
+    const toUtc = new Date(commit.timestamp).toISOString();
+    process.stderr.write(`[classifier] window: ${fromUtc} → ${toUtc}\n`);
   }
 
-  // 2. Query turns in the window — resolve the stored project_path form of cwd
+  // 2. Ingest any recent session files for this project that haven't been captured yet.
+  // The current session is still live at commit time, so the watcher may not have
+  // ingested the latest turns yet. We do a force-ingest of recently modified files.
+  await ingestRecentSessions(repo, cwd, commit.timestamp, opts.verbose);
+
+  // 3. Query turns in the window — resolve the stored project_path form of cwd
   const projectPath = repo.resolveProjectPath(cwd);
   if (opts.verbose) process.stderr.write(`[classifier] project_path: ${projectPath}\n`);
-  const fromTs = commit.prevTimestamp ?? new Date(0).toISOString();
-  const turns = repo.getTurnsInWindow(projectPath, fromTs, commit.timestamp);
+  // Normalize to UTC — git outputs local time with offset (e.g. 2026-03-30T01:54-04:00)
+  // but DB timestamps are UTC (2026-03-30T05:54Z). String comparison fails without this.
+  const fromTs = new Date(commit.prevTimestamp ?? 0).toISOString();
+  const toTs = new Date(commit.timestamp).toISOString();
+  const turns = repo.getTurnsInWindow(projectPath, fromTs, toTs);
 
   if (turns.length === 0) {
     if (opts.verbose) process.stderr.write("[classifier] no turns in window, skipping\n");

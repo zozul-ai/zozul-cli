@@ -139,6 +139,12 @@ function migrate(db: Database.Database): void {
 
     CREATE INDEX IF NOT EXISTS idx_work_segments_project ON work_segments(project_path, created_at DESC);
   `);
+
+  // Additive column migrations — safe to run on existing DBs
+  const turnsColumns = (db.pragma("table_info(turns)") as { name: string }[]).map(r => r.name);
+  if (!turnsColumns.includes("is_real_user")) {
+    db.exec(`ALTER TABLE turns ADD COLUMN is_real_user INTEGER DEFAULT 0`);
+  }
 }
 
 export type SessionRow = {
