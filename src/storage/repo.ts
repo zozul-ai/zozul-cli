@@ -626,18 +626,20 @@ export class SessionRepo {
       INSERT INTO work_segments (
         commit_sha, commit_message, project_path, changed_files,
         from_timestamp, to_timestamp, turn_count,
-        summary, type, area, tags,
+        summary, narrative, type, area, components, approach, dead_ends, learnings, tags,
         classifier_model, classifier_input_tokens, classifier_output_tokens, classifier_cost_usd,
         created_at
       ) VALUES (
         @commit_sha, @commit_message, @project_path, @changed_files,
         @from_timestamp, @to_timestamp, @turn_count,
-        @summary, @type, @area, @tags,
+        @summary, @narrative, @type, @area, @components, @approach, @dead_ends, @learnings, @tags,
         @classifier_model, @classifier_input_tokens, @classifier_output_tokens, @classifier_cost_usd,
         @created_at
       )
       ON CONFLICT(commit_sha, project_path) DO UPDATE SET
-        summary = @summary, type = @type, area = @area, tags = @tags,
+        summary = @summary, narrative = @narrative,
+        type = @type, area = @area, components = @components,
+        approach = @approach, dead_ends = @dead_ends, learnings = @learnings, tags = @tags,
         turn_count = @turn_count,
         classifier_model = @classifier_model,
         classifier_input_tokens = @classifier_input_tokens,

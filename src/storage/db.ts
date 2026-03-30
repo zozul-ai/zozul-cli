@@ -126,8 +126,13 @@ function migrate(db: Database.Database): void {
       to_timestamp              TEXT NOT NULL,
       turn_count                INTEGER DEFAULT 0,
       summary                   TEXT,
-      type                      TEXT,           -- bugfix|feature|refactor|exploration|docs|other
+      narrative                 TEXT,
+      type                      TEXT,           -- bugfix|feature|refactor|exploration|docs|chore|other
       area                      TEXT,
+      components                TEXT,           -- JSON array
+      approach                  TEXT,
+      dead_ends                 TEXT,           -- JSON array
+      learnings                 TEXT,           -- JSON array
       tags                      TEXT,           -- JSON array
       classifier_model          TEXT,
       classifier_input_tokens   INTEGER DEFAULT 0,
@@ -144,6 +149,20 @@ function migrate(db: Database.Database): void {
   const turnsColumns = (db.pragma("table_info(turns)") as { name: string }[]).map(r => r.name);
   if (!turnsColumns.includes("is_real_user")) {
     db.exec(`ALTER TABLE turns ADD COLUMN is_real_user INTEGER DEFAULT 0`);
+  }
+
+  const segCols = (db.pragma("table_info(work_segments)") as { name: string }[]).map(r => r.name);
+  const newSegCols: [string, string][] = [
+    ["narrative", "TEXT"],
+    ["components", "TEXT"],
+    ["approach", "TEXT"],
+    ["dead_ends", "TEXT"],
+    ["learnings", "TEXT"],
+  ];
+  for (const [col, type] of newSegCols) {
+    if (!segCols.includes(col)) {
+      db.exec(`ALTER TABLE work_segments ADD COLUMN ${col} ${type}`);
+    }
   }
 }
 
@@ -231,14 +250,19 @@ export type WorkSegmentRow = {
   commit_sha: string;
   commit_message: string;
   project_path: string | null;
-  changed_files: string | null;       // JSON array
+  changed_files: string | null;   // JSON array
   from_timestamp: string;
   to_timestamp: string;
   turn_count: number;
   summary: string | null;
+  narrative: string | null;
   type: string | null;
   area: string | null;
-  tags: string | null;                // JSON array
+  components: string | null;      // JSON array
+  approach: string | null;
+  dead_ends: string | null;       // JSON array
+  learnings: string | null;       // JSON array
+  tags: string | null;            // JSON array
   classifier_model: string | null;
   classifier_input_tokens: number;
   classifier_output_tokens: number;

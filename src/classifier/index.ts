@@ -32,30 +32,36 @@ interface CommitInfo {
   timestamp: string;
   prevTimestamp: string | null;
   changedFiles: string[];
+  diff: string;
 }
 
 function getCommitInfo(cwd: string): CommitInfo {
-  // Get last 2 commits: sha, ISO timestamp, subject
+  // Get last 2 commits: sha, ISO timestamp, full message body
   const log = execSync(
-    "git log -2 --format=%H%x00%aI%x00%s",
+    "git log -2 --format=%H%x00%aI%x00%B%x01",
     { cwd, encoding: "utf-8" }
   ).trim();
 
-  const lines = log.split("\n").filter(Boolean);
-  if (lines.length === 0) throw new Error("No commits found");
+  const entries = log.split("\x01").map(s => s.trim()).filter(Boolean);
+  if (entries.length === 0) throw new Error("No commits found");
 
-  const [sha, timestamp, message] = lines[0].split("\x00");
-  const prevTimestamp = lines.length > 1 ? lines[1].split("\x00")[1] : null;
+  const [sha, timestamp, ...messageParts] = entries[0].split("\x00");
+  const message = messageParts.join("\x00").trim();
+  const prevTimestamp = entries.length > 1 ? entries[1].split("\x00")[1] : null;
 
   let changedFiles: string[] = [];
+  let diff = "";
   try {
-    const diff = execSync("git diff HEAD~1 HEAD --name-only", { cwd, encoding: "utf-8" }).trim();
-    changedFiles = diff ? diff.split("\n").filter(Boolean) : [];
+    changedFiles = execSync("git diff HEAD~1 HEAD --name-only", { cwd, encoding: "utf-8" })
+      .trim().split("\n").filter(Boolean);
+    // Get the actual diff, capped at 8000 chars to keep tokens manageable
+    const rawDiff = execSync("git diff HEAD~1 HEAD", { cwd, encoding: "utf-8" });
+    diff = rawDiff.length > 8000 ? rawDiff.slice(0, 8000) + "\n... (truncated)" : rawDiff;
   } catch {
     // First commit or shallow clone — skip
   }
 
-  return { sha, message, timestamp, prevTimestamp, changedFiles };
+  return { sha, message, timestamp, prevTimestamp, changedFiles, diff };
 }
 
 /**
@@ -95,100 +101,126 @@ async function ingestRecentSessions(
 }
 
 function formatToolInput(toolName: string, input: Record<string, unknown>): string {
-  // Return a compact representation of the tool call for the prompt
   switch (toolName) {
     case "Read":
     case "Write":
+      return String(input.file_path ?? input.path ?? "");
     case "Edit":
-      return String(input.file_path ?? input.path ?? "").slice(0, 80);
+      return String(input.file_path ?? input.path ?? "");
     case "Bash":
-      return String(input.command ?? "").slice(0, 80);
+      return String(input.command ?? "").slice(0, 200);
     case "Grep":
-      return `"${String(input.pattern ?? "").slice(0, 40)}"${input.path ? ` in ${String(input.path).slice(0, 40)}` : ""}`;
+      return `"${String(input.pattern ?? "")}"${input.path ? ` in ${String(input.path)}` : ""}`;
     case "Glob":
-      return String(input.pattern ?? "").slice(0, 60);
+      return String(input.pattern ?? "");
     case "WebSearch":
-      return String(input.query ?? "").slice(0, 60);
+      return String(input.query ?? "");
     case "WebFetch":
-      return String(input.url ?? "").slice(0, 60);
+      return String(input.url ?? "");
     default:
-      return JSON.stringify(input).slice(0, 80);
+      return JSON.stringify(input).slice(0, 120);
   }
 }
 
 function buildPrompt(commit: CommitInfo, turns: TurnRow[]): string {
   const lines: string[] = [];
 
-  lines.push("You are classifying a block of Claude Code work that occurred between two git commits.");
-  lines.push("");
-  lines.push("## Commit");
-  lines.push(`SHA: ${commit.sha.slice(0, 12)}`);
-  lines.push(`Message: ${commit.message}`);
-  if (commit.changedFiles.length > 0) {
-    lines.push("Changed files:");
-    for (const f of commit.changedFiles.slice(0, 20)) {
-      lines.push(`  - ${f}`);
-    }
-  }
-  lines.push("");
-  lines.push(`## Work Session (${turns.length} turns)`);
+  lines.push("You are documenting a block of AI-assisted engineering work that occurred between two git commits.");
+  lines.push("Your goal is to produce a rich, accurate record that will be useful when reviewing this work later —");
+  lines.push("including what was tried, what failed, what was learned, and what was ultimately shipped.");
   lines.push("");
 
-  // Group turns into interaction blocks: real user turn + following assistant turns
+  // ── Commit context ──
+  lines.push("## Commit");
+  lines.push(`SHA: ${commit.sha.slice(0, 12)}`);
+  lines.push(`Message:\n${commit.message}`);
+  lines.push("");
+
+  if (commit.diff) {
+    lines.push("## Code Changes (git diff)");
+    lines.push(commit.diff);
+    lines.push("");
+  } else if (commit.changedFiles.length > 0) {
+    lines.push("## Changed Files");
+    for (const f of commit.changedFiles) lines.push(`  - ${f}`);
+    lines.push("");
+  }
+
+  // ── Interaction log ──
+  lines.push(`## Interaction Log (${turns.length} turns)`);
+  lines.push("");
+
   let i = 0;
-  let blockCount = 0;
-  while (i < turns.length && blockCount < 30) {
+  while (i < turns.length) {
     const turn = turns[i];
 
     if (turn.is_real_user) {
-      const text = (turn.content_text ?? "").trim().slice(0, 200);
-      if (text) lines.push(`User: "${text}"`);
+      const text = (turn.content_text ?? "").trim();
+      if (text) lines.push(`User: "${text.slice(0, 500)}"`);
       i++;
 
-      // Gather following assistant turns
-      const toolNames: string[] = [];
-      const reasoningParts: string[] = [];
+      const toolCalls: string[] = [];
+      const reasoning: string[] = [];
 
       while (i < turns.length && !turns[i].is_real_user) {
         const t = turns[i];
         if (t.role === "assistant") {
-          // Collect tool calls (name + input only, no result)
           if (t.tool_calls) {
             try {
               const calls = JSON.parse(t.tool_calls) as { toolName: string; toolInput: Record<string, unknown> }[];
               for (const c of calls) {
-                const formatted = formatToolInput(c.toolName, c.toolInput ?? {});
-                toolNames.push(`${c.toolName}(${formatted})`);
+                toolCalls.push(`${c.toolName}(${formatToolInput(c.toolName, c.toolInput ?? {})})`);
               }
             } catch { /* skip */ }
           }
-          // Collect brief reasoning text
           const txt = (t.content_text ?? "").trim();
-          if (txt && reasoningParts.length < 2) {
-            reasoningParts.push(txt.slice(0, 150));
-          }
+          if (txt) reasoning.push(txt.slice(0, 400));
         }
         i++;
       }
 
-      if (toolNames.length > 0) {
-        lines.push(`Claude used: ${toolNames.slice(0, 12).join(", ")}`);
+      if (toolCalls.length > 0) {
+        lines.push(`  Tools: ${toolCalls.join(", ")}`);
       }
-      if (reasoningParts.length > 0) {
-        for (const r of reasoningParts) {
-          lines.push(`Claude said: "${r}"`);
-        }
+      for (const r of reasoning) {
+        lines.push(`  Claude: "${r}"`);
       }
       lines.push("");
-      blockCount++;
     } else {
       i++;
     }
   }
 
-  lines.push("## Task");
-  lines.push("Return ONLY valid JSON, no markdown fences, no explanation:");
-  lines.push(`{"summary":"one sentence describing what was accomplished","type":"bugfix|feature|refactor|exploration|docs|other","area":"primary module or concern (short)","tags":["tag1","tag2"]}`);
+  // ── Output schema ──
+  lines.push("## Your Task");
+  lines.push(`Produce a JSON document capturing what happened in this work session. Be specific and detailed.`);
+  lines.push("");
+  lines.push("Fields:");
+  lines.push('  "summary": 2-4 sentences. What was the goal, what approach was taken, what was the outcome.');
+  lines.push('  "narrative": Full prose account (5-10 sentences). Include the progression of the work, pivots,');
+  lines.push('               failed attempts, key debugging moments, and final resolution. This is the main record.');
+  lines.push('  "type": One of: bugfix | feature | refactor | exploration | docs | chore | other');
+  lines.push('  "area": Primary system/module affected (e.g. "storage", "dashboard", "auth", "classifier")');
+  lines.push('  "components": Array of all distinct files/modules/systems touched');
+  lines.push('  "approach": One sentence on the technical approach or strategy used');
+  lines.push('  "dead_ends": Array of approaches tried that did not work, with brief reason why');
+  lines.push('  "learnings": Array of non-obvious insights, discoveries, or gotchas uncovered during the work');
+  lines.push('  "tags": Array of 3-8 semantic tags. Use specific technical terms, not generic words.');
+  lines.push('          Good examples: "sqlite-migration", "timestamp-normalization", "git-hooks", "haiku", "otel"');
+  lines.push('          Avoid: "code", "fix", "work", "session", "claude"');
+  lines.push("");
+  lines.push("Return ONLY valid JSON, no markdown fences, no prose before or after:");
+  lines.push(`{
+  "summary": "...",
+  "narrative": "...",
+  "type": "...",
+  "area": "...",
+  "components": ["..."],
+  "approach": "...",
+  "dead_ends": ["..."],
+  "learnings": ["..."],
+  "tags": ["..."]
+}`);
 
   return lines.join("\n");
 }
@@ -236,8 +268,13 @@ function runClaude(prompt: string, model: string, verbose?: boolean): ClaudeOutp
 
 interface ClassifierJson {
   summary?: string;
+  narrative?: string;
   type?: string;
   area?: string;
+  components?: unknown[];
+  approach?: string;
+  dead_ends?: unknown[];
+  learnings?: unknown[];
   tags?: unknown[];
 }
 
@@ -313,12 +350,18 @@ export async function classifyCommit(
     return null;
   }
 
-  const summary = String(parsed.summary ?? "").trim();
-  const type = String(parsed.type ?? "other").trim();
-  const area = String(parsed.area ?? "").trim();
-  const tags = Array.isArray(parsed.tags)
-    ? parsed.tags.map(t => String(t)).filter(Boolean)
-    : [];
+  const toStrArray = (v: unknown) =>
+    Array.isArray(v) ? v.map(x => String(x)).filter(Boolean) : [];
+
+  const summary    = String(parsed.summary ?? "").trim();
+  const narrative  = String(parsed.narrative ?? "").trim();
+  const type       = String(parsed.type ?? "other").trim();
+  const area       = String(parsed.area ?? "").trim();
+  const components = toStrArray(parsed.components);
+  const approach   = String(parsed.approach ?? "").trim();
+  const dead_ends  = toStrArray(parsed.dead_ends);
+  const learnings  = toStrArray(parsed.learnings);
+  const tags       = toStrArray(parsed.tags);
 
   // 5. Store work segment
   repo.insertWorkSegment({
@@ -327,11 +370,16 @@ export async function classifyCommit(
     project_path: projectPath,
     changed_files: JSON.stringify(commit.changedFiles),
     from_timestamp: fromTs,
-    to_timestamp: commit.timestamp,
+    to_timestamp: toTs,
     turn_count: turns.length,
     summary,
+    narrative,
     type,
     area,
+    components: JSON.stringify(components),
+    approach,
+    dead_ends: JSON.stringify(dead_ends),
+    learnings: JSON.stringify(learnings),
     tags: JSON.stringify(tags),
     classifier_model: claudeOut.model,
     classifier_input_tokens: claudeOut.inputTokens,
@@ -342,6 +390,8 @@ export async function classifyCommit(
 
   if (opts.verbose) {
     process.stderr.write(`[classifier] stored: ${summary}\n`);
+    if (dead_ends.length > 0) process.stderr.write(`[classifier] dead ends: ${dead_ends.join("; ")}\n`);
+    if (learnings.length > 0) process.stderr.write(`[classifier] learnings: ${learnings.join("; ")}\n`);
   }
 
   return {
