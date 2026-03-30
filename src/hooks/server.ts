@@ -4,11 +4,14 @@ import { ingestSessionFile } from "../parser/ingest.js";
 import { handleOtlpMetrics, handleOtlpLogs } from "../otel/receiver.js";
 import { dashboardHtml, dashboardHtmlWithToggle } from "../dashboard/html.js";
 import { getActiveContext, clearActiveContext } from "../context/index.js";
+import { ZozulApiClient } from "../sync/client.js";
+import { syncSingleSession, runSync } from "../sync/index.js";
 
 export interface HookServerOptions {
   port: number;
   repo: SessionRepo;
   verbose?: boolean;
+  syncClient?: ZozulApiClient;
 }
 
 /**
@@ -19,7 +22,7 @@ export interface HookServerOptions {
  *  - Web dashboard (GET /dashboard)
  */
 export function createHookServer(opts: HookServerOptions): http.Server {
-  const { repo, verbose } = opts;
+  const { repo, verbose, syncClient } = opts;
   // Track last SessionEnd time per session to suppress rapid duplicates (Claude Code
   // sometimes fires two SessionEnd events within seconds for the same session).
   const lastSessionEnd = new Map<string, number>();
@@ -48,7 +51,7 @@ export function createHookServer(opts: HookServerOptions): http.Server {
 
       // ── Hook events ──
       if (method === "POST" && url.startsWith("/hook")) {
-        await handleHookEvent(url, req, repo, res, verbose, lastSessionEnd);
+        await handleHookEvent(url, req, repo, res, verbose, lastSessionEnd, syncClient);
         return;
       }
 
@@ -59,7 +62,7 @@ export function createHookServer(opts: HookServerOptions): http.Server {
         const html = apiUrl && apiKey
           ? dashboardHtmlWithToggle({ apiUrl, apiKey }, "local")
           : dashboardHtml();
-        res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
+        res.writeHead(200, { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store" });
         res.end(html);
         return;
       }
@@ -91,6 +94,7 @@ async function handleHookEvent(
   res: http.ServerResponse,
   verbose?: boolean,
   lastSessionEnd?: Map<string, number>,
+  syncClient?: ZozulApiClient,
 ): Promise<void> {
   const body = await readBody(req);
 
@@ -127,6 +131,17 @@ async function handleHookEvent(
       } catch (err) {
         if (verbose) log(`  -> transcript ingest failed: ${err}`);
       }
+
+      // Sync session immediately, then do a delayed sweep to catch trailing OTEL data
+      if (syncClient && payload.session_id) {
+        syncSingleSession(repo, syncClient, payload.session_id, { verbose }).catch(() => {});
+        setTimeout(() => runSync(repo, syncClient, { verbose }).catch(() => {}), 90_000);
+      }
+    }
+
+    // On Stop: sync the current session immediately
+    if (eventName === "Stop" && payload.session_id && syncClient) {
+      syncSingleSession(repo, syncClient, payload.session_id, { verbose }).catch(() => {});
     }
 
     // Auto-clear context when Claude runs git commit or git push

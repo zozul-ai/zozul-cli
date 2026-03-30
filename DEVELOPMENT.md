@@ -16,7 +16,7 @@ zozul-cli is a local observability sidecar for Claude Code. It ingests data from
 src/
   index.ts              Entry point — loads .env, runs CLI
   cli/
-    commands.ts         All CLI commands (serve, install, ingest, etc.)
+    commands.ts         All CLI commands (5 top-level + hidden utilities)
     format.ts           Terminal output formatters
   storage/
     db.ts               SQLite setup, schema migration, row types
@@ -24,6 +24,7 @@ src/
   hooks/
     server.ts           HTTP server: hook handler, API routes, OTEL receiver dispatch
     config.ts           Read/write ~/.claude/settings.json for hooks
+    git.ts              Install/uninstall git post-commit hook (auto-clears context)
   otel/
     receiver.ts         Parse OTLP JSON payloads → DB + session accumulation
     config.ts           Read/write ~/.claude/settings.json for OTEL env vars
@@ -34,9 +35,18 @@ src/
     types.ts            JSONL type definitions
   dashboard/
     index.html          Dashboard SPA (vanilla JS, Chart.js from CDN)
-    html.ts             Reads and serves index.html (thin wrapper)
+    html.ts             Serve index.html; dashboardHtmlWithToggle injects ZOZUL_CONFIG for remote toggle
+  context/
+    index.ts            Read/write ~/.zozul/context.json — active task tags
+  sync/
+    client.ts           ZozulApiClient — HTTP client for backend API
+    transform.ts        SQLite row → API payload converters
+    index.ts            Watermark-based incremental sync (sessions + OTEL bulk tables)
+    sync.test.ts        Vitest tests for sync logic
   service/
     index.ts            Install/uninstall as launchd (macOS) or systemd (Linux) service
+  pricing/
+    index.ts            Model pricing table for per-turn cost calculation
 ```
 
 Build output goes to `dist/`. The build script also copies `src/dashboard/index.html` → `dist/dashboard/index.html`.
@@ -93,7 +103,7 @@ Each line in the file is one JSON entry. Entries have `message.role`, `message.c
 
 ## Database schema
 
-Six tables, all in `~/.zozul/zozul.db` (WAL mode, foreign keys ON).
+Eight tables, all in `~/.zozul/zozul.db` (WAL mode, foreign keys ON).
 
 ### `sessions`
 One row per Claude Code session. Updated from both JSONL and OTEL.
@@ -187,6 +197,26 @@ prompt_id TEXT
 timestamp TEXT
 ```
 
+### `task_tags`
+Maps turns to task tag strings. Populated during JSONL ingest when a context is active.
+
+```sql
+id INTEGER PRIMARY KEY AUTOINCREMENT
+turn_id INTEGER → turns(id)
+task TEXT
+tagged_at TEXT                -- ISO timestamp
+UNIQUE(turn_id, task)
+```
+
+### `sync_watermarks`
+Tracks incremental sync progress per table. Prevents re-syncing already-uploaded data.
+
+```sql
+table_name TEXT PRIMARY KEY   -- 'sessions', 'turns', 'otel_metrics', 'otel_events'
+last_id INTEGER               -- highest rowid/id successfully synced
+updated_at TEXT
+```
+
 ---
 
 ## Key design decisions
@@ -235,10 +265,17 @@ All served by `hooks/server.ts` on port 7890.
 | GET | `/api/sessions` | Paginated session list — returns `{ sessions, total, limit, offset }` |
 | GET | `/api/sessions/:id` | Single session row |
 | GET | `/api/sessions/:id/turns` | Turns for a session |
+| GET | `/api/turns/:id/block` | Full turn block (content + tool calls) |
 | GET | `/api/metrics/tokens` | Token time-series from `otel_metrics` |
 | GET | `/api/metrics/cost` | Cost time-series from `otel_metrics` |
 | GET | `/api/metrics/tools` | Tool usage breakdown from `tool_uses` |
 | GET | `/api/metrics/models` | Per-model cost/token breakdown from `otel_metrics` |
+| GET | `/api/context` | Active task context (`~/.zozul/context.json`) |
+| GET | `/api/tasks` | All distinct task tags with turn counts |
+| GET | `/api/tasks/stats` | Multi-tag cost/token stats (`?tags=a,b&mode=any\|all`) |
+| GET | `/api/tasks/turns` | Turns across tags, paginated |
+| GET | `/api/tasks/:name/turns` | Turns for a single tag, paginated |
+| GET | `/api/tasks/:name/stats` | Cost/token breakdown for a single tag |
 | POST | `/v1/metrics` | OTLP metrics receiver |
 | POST | `/v1/logs` | OTLP logs receiver |
 | POST | `/hook/:event` | Claude Code hook receiver |
@@ -246,6 +283,57 @@ All served by `hooks/server.ts` on port 7890.
 `/api/sessions` accepts `?limit=N` (default 50, max 500) and `?offset=N`. The response envelope `{ sessions, total, limit, offset }` lets the dashboard implement Load More without a separate count query.
 
 Time-series endpoints accept `?range=7d`, `?range=24h`, or `?from=ISO&to=ISO&step=5m`. Step auto-selects based on range if omitted.
+
+---
+
+## CLI commands
+
+The CLI has been consolidated to 5 top-level commands (plus hidden utilities):
+
+| Command | Description |
+|---|---|
+| `zozul serve` | Start the local HTTP server (hooks + OTEL + dashboard + API) |
+| `zozul install` | Configure Claude Code hooks/OTEL, install background service, install git hook |
+| `zozul sync` | Push local SQLite data to remote backend (requires `ZOZUL_API_URL` + `ZOZUL_API_KEY`) |
+| `zozul context [tags...]` | Set or clear active task context tags |
+| `zozul install --status` | Show background service status |
+| `zozul install --restart` | Restart the background service (replaces old `zozul restart`) |
+| `zozul ingest` | Hidden — manually ingest a JSONL file |
+| `zozul db-clean` | Hidden — remove rows with invalid timestamps |
+
+---
+
+## Remote sync
+
+`zozul sync` pushes local SQLite data to the remote backend incrementally using watermarks stored in `sync_watermarks`. It syncs three data types:
+
+1. **Sessions** — all sessions with new data since last sync (by rowid watermark)
+2. **OTEL metrics** — bulk, batched at 500 rows
+3. **OTEL events** — bulk, batched at 500 rows
+
+Each session sync sends the full payload in one request: session row + all turns + tool_uses + task_tags + hook_events. The backend upserts everything atomically.
+
+**Configuration** (via `.env` or environment):
+```
+ZOZUL_API_URL=http://...    # Backend base URL
+ZOZUL_API_KEY=zozul_...     # API key (X-API-Key header)
+```
+
+**Source files**:
+- `src/sync/client.ts` — HTTP client (`ZozulApiClient`)
+- `src/sync/transform.ts` — SQLite row → API payload converters
+- `src/sync/index.ts` — watermark-based incremental sync logic
+
+**Getting an API key**: use the admin endpoints on the backend (requires `X-Admin-Key`):
+```bash
+# Create a user
+curl -X POST $BASE/api/v1/admin/users -H "X-Admin-Key: $ADMIN_KEY" \
+  -d '{"name": "Your Name", "email": "you@example.com"}'
+
+# Generate API key for that user (returns full key once)
+curl -X POST $BASE/api/v1/admin/api-keys -H "X-Admin-Key: $ADMIN_KEY" \
+  -d '{"user_id": <id>}'
+```
 
 ---
 
@@ -258,9 +346,27 @@ Time-series endpoints accept `?range=7d`, `?range=24h`, or `?from=ISO&to=ISO&ste
 
 The service file bakes in the absolute paths to the node binary (`process.execPath`) and the script (`process.argv[1]` resolved). This makes it nvm-safe but means you need to re-run `zozul install --service` if you upgrade node or move the project.
 
-`zozul restart` kills and immediately relaunches the running service (`launchctl kickstart -k` on macOS, `systemctl --user restart` on Linux). Use this after `npm run build` to pick up code changes without reinstalling.
+`zozul install --restart` kills and immediately relaunches the running service (`launchctl kickstart -k` on macOS, `systemctl --user restart` on Linux). Use this after `npm run build` to pick up code changes.
 
 Logs: `~/.zozul/zozul.log`
+
+---
+
+## Task context tagging
+
+`zozul context "tag1" "tag2"` writes `{ active: string[], set_at: string }` to `~/.zozul/context.json`. Tags are applied during JSONL ingest to all turns whose `timestamp >= set_at`. Context is cleared automatically by a git `post-commit` hook installed by `zozul install` (marker: `# zozul: auto-clear context on commit`).
+
+API:
+- `GET /api/context` — current active context
+- `GET /api/tasks` — list all distinct tag names with turn counts
+- `GET /api/tasks/:name/turns` — turns for a tag, paginated (`?limit&offset`)
+- `GET /api/tasks/:name/stats` — cost/token breakdown for a tag
+- `GET /api/tasks/turns` — cross-tag turn query (`?tags=a,b&mode=any|all`)
+- `GET /api/tasks/stats` — multi-tag stats query
+
+Source: `src/context/index.ts` (context read/write), `src/hooks/git.ts` (hook install).
+
+**Limitation**: manual discipline required. Tags apply to all turns after `set_at` regardless of whether they're topically related. No retroactive tagging of past sessions.
 
 ---
 
@@ -283,6 +389,8 @@ npm run build        # Compile TypeScript + copy index.html to dist/
 npm test             # Run vitest
 ```
 
-When the service is installed, it runs `dist/index.js` directly. After code changes: `npm run build && zozul restart`.
+When the service is installed, it runs `dist/index.js` directly. After code changes: `npm run build && zozul install --restart`.
 
 The DB is at `~/.zozul/zozul.db`. Use `sqlite3 ~/.zozul/zozul.db` for ad-hoc inspection. Use `zozul db-clean` to remove rows with invalid timestamps.
+
+For sync, set `ZOZUL_API_URL` and `ZOZUL_API_KEY` in `.env`, then `npm run dev -- sync --verbose` (or `zozul sync --verbose` if built).
