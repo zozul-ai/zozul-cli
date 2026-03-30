@@ -2,7 +2,7 @@ name: Publish to npm
 
 on:
   push:
-    branches: [main]
+    tags: ['v*']
 
 jobs:
   publish:
@@ -21,7 +21,6 @@ jobs:
 
       - run: npm test
 
-      - name: Publish (skip if version already exists)
-        run: npm publish --access public || true
+      - run: npm publish --access public
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
