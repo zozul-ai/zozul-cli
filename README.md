@@ -17,8 +17,8 @@ Each source has different strengths. OTEL is the authoritative source for **cost
 ## Quick start
 
 ```bash
-# Install and build
-npm install && npm link
+# Install globally from npm
+npm install -g zozul-cli
 
 # Configure Claude Code and install as a background service (recommended)
 zozul install --service
@@ -57,18 +57,15 @@ open http://localhost:7890/dashboard
 | `zozul serve` | Start the server (dashboard, hooks, OTEL receiver, API) on port 7890 |
 | `zozul install` | Configure Claude Code hooks and OTEL in `~/.claude/settings.json` |
 | `zozul install --service` | Configure Claude Code **and** install zozul as a login service (auto-starts) |
-| `zozul uninstall` | Remove zozul config from Claude Code settings |
-| `zozul uninstall --service` | Also stop and remove the background service |
-| `zozul restart` | Restart the background service (picks up new builds) |
-| `zozul service-status` | Show whether the background service is installed and running |
-| `zozul ingest` | Parse all Claude Code session JSONL files into the database |
-| `zozul ingest --force` | Re-ingest sessions that already exist (picks up new turns) |
-| `zozul sessions` | List recorded sessions with token/cost summaries |
-| `zozul session <id>` | Show full details and conversation for a session |
-| `zozul stats` | Show aggregate statistics across all sessions |
-| `zozul db-clean` | Remove rows with invalid timestamps from the database |
-| `zozul db-clean --session <id>` | Remove all data for a specific session |
-| `zozul show-config` | Preview the Claude Code config that would be installed |
+| `zozul install --status` | Show whether the background service is installed and running |
+| `zozul install --restart` | Restart the background service (picks up new builds) |
+| `zozul install --dry-run` | Preview the config that would be installed |
+| `zozul uninstall` | Remove zozul hooks, OTEL config, git hook, and background service |
+| `zozul context <tags...>` | Set active task tags for tagging turns (e.g. `zozul context "UI" "Feature"`) |
+| `zozul context --list` | List all tasks that have been used |
+| `zozul context --clear` | Clear the active task context |
+| `zozul sync` | Sync local data to the remote zozul backend |
+| `zozul sync --dry-run` | Show what would be synced without sending data |
 
 ## Architecture
 
@@ -174,5 +171,12 @@ CLI flags override `.env` values.
 ## Requirements
 
 - Node.js 18+
+- npm
 - Claude Code installed (`claude --version`)
 - Claude Pro, Max, Teams, Enterprise, or API key
+
+## Updating
+
+```bash
+npm install -g zozul-cli
+```
