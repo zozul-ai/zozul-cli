@@ -368,6 +368,36 @@
 
   :not(button)[title] { cursor: help; }
 
+  .work-segment {
+    padding: 14px 16px;
+    border-bottom: 1px solid var(--border);
+    display: grid;
+    grid-template-columns: 1fr auto;
+    gap: 8px;
+  }
+  .work-segment:last-child { border-bottom: none; }
+  .work-segment-summary { font-size: 14px; font-weight: 500; margin-bottom: 4px; }
+  .work-segment-meta { font-size: 12px; color: var(--text-dim); display: flex; gap: 12px; flex-wrap: wrap; align-items: center; }
+  .work-segment-commit { font-family: var(--mono); font-size: 11px; color: var(--text-dim); }
+  .work-segment-right { text-align: right; font-size: 12px; color: var(--text-dim); }
+  .type-badge {
+    display: inline-block;
+    padding: 1px 7px;
+    border-radius: 4px;
+    font-size: 10px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    font-family: var(--mono);
+  }
+  .type-bugfix    { background: rgba(239,83,80,0.15);  color: var(--red); }
+  .type-feature   { background: rgba(76,175,80,0.15);  color: var(--green); }
+  .type-refactor  { background: rgba(66,165,245,0.15); color: var(--blue); }
+  .type-exploration { background: rgba(124,110,240,0.15); color: var(--accent-light); }
+  .type-docs      { background: rgba(139,143,163,0.15); color: var(--text-dim); }
+  .type-other     { background: rgba(139,143,163,0.15); color: var(--text-dim); }
+  .work-log-empty { padding: 32px 16px; text-align: center; color: var(--text-dim); font-size: 13px; }
+
   @media (max-width: 800px) {
     .charts-grid { grid-template-columns: 1fr; }
     .stats-grid { grid-template-columns: repeat(2, 1fr); }
@@ -381,6 +411,9 @@
   <h1>zozul</h1>
   <span class="subtitle">Agent Observability</span>
   <div class="header-right">
+    <button class="auto-btn" id="work-log-btn" onclick="toggleWorkLog()" title="Work Log — commit-level summaries">
+      Work Log
+    </button>
     <button class="auto-btn" onclick="manualRefresh()" title="Auto-refresh every 10s — click to refresh now">
       <span class="live-dot"></span>
       Auto
@@ -490,6 +523,18 @@
     <div class="panel">
       <div class="panel-header">Conversation</div>
       <div id="detail-turns"></div>
+    </div>
+  </div>
+
+  <!-- Work Log view -->
+  <div id="work-log-view" style="display:none">
+    <button class="back-btn" onclick="hideWorkLog()">&#8592; Dashboard</button>
+    <div class="stats-grid" id="work-log-stats" style="margin-bottom:20px"></div>
+    <div class="panel">
+      <div class="panel-header">
+        <span>Work Log <span id="work-log-count" style="font-weight:400;font-size:11px;color:var(--text-dim)"></span></span>
+      </div>
+      <div id="work-log-list"></div>
     </div>
   </div>
 
@@ -1256,6 +1301,91 @@ async function loadCharts() {
 }
 
 loadDashboard().then(scheduleAutoRefresh);
+
+// ── Work Log ──
+
+function toggleWorkLog() {
+  const view = document.getElementById('work-log-view');
+  const mainView = document.getElementById('main-view');
+  if (view.style.display === 'none') {
+    mainView.style.display = 'none';
+    document.getElementById('detail-view').classList.remove('active');
+    document.getElementById('turn-detail-view').classList.remove('active');
+    view.style.display = '';
+    document.getElementById('work-log-btn').style.borderColor = 'var(--accent)';
+    document.getElementById('work-log-btn').style.color = 'var(--text)';
+    loadWorkLog();
+  } else {
+    hideWorkLog();
+  }
+}
+
+function hideWorkLog() {
+  document.getElementById('work-log-view').style.display = 'none';
+  document.getElementById('main-view').style.display = '';
+  document.getElementById('work-log-btn').style.borderColor = '';
+  document.getElementById('work-log-btn').style.color = '';
+}
+
+function typeBadge(type) {
+  const t = (type || 'other').toLowerCase();
+  return `<span class="type-badge type-${t}">${escHtml(t)}</span>`;
+}
+
+async function loadWorkLog() {
+  const data = await fetchJson('/api/work-segments?limit=100');
+
+  // Spend stats
+  const spend = data.classifier_spend || {};
+  const statsEl = document.getElementById('work-log-stats');
+  statsEl.innerHTML = [
+    { label: 'Segments', value: data.total || 0 },
+    { label: 'Classifier Spend', value: '$' + (spend.total_cost_usd || 0).toFixed(4) },
+    { label: 'Classifier Tokens In', value: fmtNum(spend.total_input_tokens || 0) },
+    { label: 'Classifier Tokens Out', value: fmtNum(spend.total_output_tokens || 0) },
+  ].map(s => `<div class="stat-card"><div class="label">${s.label}</div><div class="value">${s.value}</div></div>`).join('');
+
+  const countEl = document.getElementById('work-log-count');
+  countEl.textContent = data.total ? `(${data.total})` : '';
+
+  const listEl = document.getElementById('work-log-list');
+  const segments = data.segments || [];
+
+  if (segments.length === 0) {
+    listEl.innerHTML = '<div class="work-log-empty">No work segments yet.<br>They appear automatically after each <code>git commit</code>.</div>';
+    return;
+  }
+
+  listEl.innerHTML = segments.map(s => {
+    const tags = s.tags ? JSON.parse(s.tags) : [];
+    const files = s.changed_files ? JSON.parse(s.changed_files) : [];
+    const tagHtml = tags.map(t => `<span class="tag-chip" style="cursor:default">${escHtml(t)}</span>`).join('');
+    const filesHtml = files.length > 0
+      ? `<span title="${escHtml(files.join('\n'))}">${files.length} file${files.length !== 1 ? 's' : ''} changed</span>`
+      : '';
+    const costHtml = s.classifier_cost_usd > 0
+      ? `<span title="Classifier cost">$${s.classifier_cost_usd.toFixed(5)}</span>`
+      : '';
+
+    return `<div class="work-segment">
+      <div>
+        <div class="work-segment-summary">${escHtml(s.summary || s.commit_message)}</div>
+        <div class="work-segment-meta">
+          ${typeBadge(s.type)}
+          ${s.area ? `<span>${escHtml(s.area)}</span>` : ''}
+          <span>${s.turn_count} turns</span>
+          ${filesHtml}
+          ${tagHtml}
+        </div>
+        <div class="work-segment-commit" style="margin-top:6px">${escHtml(s.commit_sha ? s.commit_sha.slice(0,10) : '')} — ${escHtml(s.commit_message)}</div>
+      </div>
+      <div class="work-segment-right">
+        <div>${fmtDate(s.created_at)}</div>
+        ${costHtml ? `<div style="margin-top:4px;font-size:11px">${costHtml}</div>` : ''}
+      </div>
+    </div>`;
+  }).join('');
+}
 </script>
 </body>
 </html>

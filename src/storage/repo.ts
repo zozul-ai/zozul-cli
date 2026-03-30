@@ -1,5 +1,5 @@
 import type Database from "better-sqlite3";
-import type { SessionRow, TurnRow, ToolUseRow, HookEventRow, OtelMetricRow, OtelEventRow, TaskTagRow } from "./db.js";
+import type { SessionRow, TurnRow, ToolUseRow, HookEventRow, OtelMetricRow, OtelEventRow, TaskTagRow, WorkSegmentRow } from "./db.js";
 
 export class SessionRepo {
   constructor(private db: Database.Database) {}
@@ -590,6 +590,85 @@ export class SessionRepo {
     return this.db.prepare(
       `SELECT * FROM task_tags WHERE id > ? ORDER BY id ASC LIMIT ?`
     ).all(minId, limit) as TaskTagRow[];
+  }
+
+  // ── Work segments ──
+
+  /**
+   * Resolve the project_path as stored in the DB for a given filesystem cwd.
+   * Claude Code encodes paths by replacing "/" with "-", then we decode back by
+   * replacing "-" with "/". For directories with hyphens (e.g. "zozul-cli") this
+   * means the stored path differs from the real cwd. We try exact match first,
+   * then fall back to the encoded-decoded form.
+   */
+  resolveProjectPath(cwd: string): string {
+    const exact = this.db.prepare(
+      `SELECT COUNT(*) as n FROM sessions WHERE project_path = ?`
+    ).get(cwd) as { n: number };
+    if (exact.n > 0) return cwd;
+    // Simulate encode (/ → -) then decode (- → /) to match stored form
+    return cwd.replace(/\//g, "-").replace(/-/g, "/");
+  }
+
+  getTurnsInWindow(projectPath: string, fromTimestamp: string, toTimestamp: string): TurnRow[] {
+    return this.db.prepare(`
+      SELECT t.* FROM turns t
+      JOIN sessions s ON s.id = t.session_id
+      WHERE s.project_path = ?
+        AND t.timestamp >= ?
+        AND t.timestamp <= ?
+      ORDER BY t.timestamp ASC
+    `).all(projectPath, fromTimestamp, toTimestamp) as TurnRow[];
+  }
+
+  insertWorkSegment(segment: Omit<WorkSegmentRow, "id">): number {
+    const row = this.db.prepare(`
+      INSERT INTO work_segments (
+        commit_sha, commit_message, project_path, changed_files,
+        from_timestamp, to_timestamp, turn_count,
+        summary, type, area, tags,
+        classifier_model, classifier_input_tokens, classifier_output_tokens, classifier_cost_usd,
+        created_at
+      ) VALUES (
+        @commit_sha, @commit_message, @project_path, @changed_files,
+        @from_timestamp, @to_timestamp, @turn_count,
+        @summary, @type, @area, @tags,
+        @classifier_model, @classifier_input_tokens, @classifier_output_tokens, @classifier_cost_usd,
+        @created_at
+      )
+      ON CONFLICT(commit_sha, project_path) DO UPDATE SET
+        summary = @summary, type = @type, area = @area, tags = @tags,
+        turn_count = @turn_count,
+        classifier_model = @classifier_model,
+        classifier_input_tokens = @classifier_input_tokens,
+        classifier_output_tokens = @classifier_output_tokens,
+        classifier_cost_usd = @classifier_cost_usd
+      RETURNING id
+    `).get(segment) as { id: number } | undefined;
+    return row?.id ?? 0;
+  }
+
+  listWorkSegments(limit = 50, offset = 0): WorkSegmentRow[] {
+    return this.db.prepare(`
+      SELECT * FROM work_segments ORDER BY created_at DESC LIMIT ? OFFSET ?
+    `).all(limit, offset) as WorkSegmentRow[];
+  }
+
+  countWorkSegments(): number {
+    const row = this.db.prepare(`SELECT COUNT(*) as n FROM work_segments`).get() as { n: number };
+    return row.n;
+  }
+
+  getClassifierSpendTotal(): { total_cost_usd: number; total_input_tokens: number; total_output_tokens: number; count: number } {
+    return this.db.prepare(`
+      SELECT
+        COALESCE(SUM(classifier_cost_usd), 0) as total_cost_usd,
+        COALESCE(SUM(classifier_input_tokens), 0) as total_input_tokens,
+        COALESCE(SUM(classifier_output_tokens), 0) as total_output_tokens,
+        COUNT(*) as count
+      FROM work_segments
+      WHERE summary IS NOT NULL
+    `).get() as { total_cost_usd: number; total_input_tokens: number; total_output_tokens: number; count: number };
   }
 
   getTurnLookup(): Map<number, { session_id: string; turn_index: number }> {

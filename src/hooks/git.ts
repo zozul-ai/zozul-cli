@@ -17,6 +17,7 @@ const HOOK_SCRIPT = `
 ${HOOK_MARKER}
 if command -v zozul >/dev/null 2>&1; then
   zozul context --clear 2>/dev/null
+  zozul classify-commit 2>/dev/null &
 fi
 `;
 

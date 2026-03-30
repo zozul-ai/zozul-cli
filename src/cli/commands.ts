@@ -11,6 +11,7 @@ import { getActiveContext, setActiveContext, clearActiveContext } from "../conte
 import { installGitHook, uninstallGitHook } from "../hooks/git.js";
 import { runSync } from "../sync/index.js";
 import { ZozulApiClient } from "../sync/client.js";
+import { classifyCommit } from "../classifier/index.js";
 
 function envPort(): string {
   return process.env.ZOZUL_PORT ?? "7890";
@@ -286,6 +287,47 @@ export function buildCli(): Command {
       }
 
       db.close();
+    });
+
+  program
+    .command("classify-commit")
+    .description("Classify the current git commit's work using Claude and store as a work segment")
+    .option("--cwd <path>", "Project directory (defaults to git repo root)")
+    .option("--model <model>", "Claude model to use", "claude-haiku-4-5-20251001")
+    .option("-v, --verbose", "Print detailed progress")
+    .action(async (opts) => {
+      const verbose = opts.verbose || envVerbose();
+
+      // Resolve cwd: explicit flag > git repo root > process.cwd()
+      let cwd: string = opts.cwd ?? process.cwd();
+      if (!opts.cwd) {
+        try {
+          const { execSync } = await import("node:child_process");
+          cwd = execSync("git rev-parse --show-toplevel", { encoding: "utf-8", cwd }).trim();
+        } catch { /* not a git repo, use cwd */ }
+      }
+
+      const db = getDb(envDbPath());
+      const repo = new SessionRepo(db);
+
+      try {
+        const result = await classifyCommit(repo, cwd, { verbose, model: opts.model });
+        if (result) {
+          console.log(`Classified: ${result.summary}`);
+          console.log(`  type=${result.type}  area=${result.area}  turns=${result.turnCount}`);
+          if (result.tags.length > 0) console.log(`  tags: ${result.tags.join(", ")}`);
+          if (result.classifierCostUsd > 0) {
+            console.log(`  classifier cost: $${result.classifierCostUsd.toFixed(6)}`);
+          }
+        } else {
+          if (verbose) console.log("Nothing to classify.");
+        }
+      } catch (err) {
+        console.error(`Classification failed: ${err instanceof Error ? err.message : err}`);
+        process.exit(1);
+      } finally {
+        db.close();
+      }
     });
 
   // ── Hidden maintenance commands ──

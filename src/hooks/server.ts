@@ -270,6 +270,17 @@ function handleApiRoute(url: string, repo: SessionRepo, res: http.ServerResponse
     return;
   }
 
+  if (path === "/api/work-segments") {
+    const qs = new URL(url, "http://x").searchParams;
+    const limit = Math.min(200, Math.max(1, parseInt(qs.get("limit") ?? "50", 10)));
+    const offset = Math.max(0, parseInt(qs.get("offset") ?? "0", 10));
+    const segments = repo.listWorkSegments(limit, offset);
+    const total = repo.countWorkSegments();
+    const spend = repo.getClassifierSpendTotal();
+    sendJson(res, 200, { segments, total, limit, offset, classifier_spend: spend });
+    return;
+  }
+
   const taskTurnsMatch = path.match(/^\/api\/tasks\/([^/]+)\/turns$/);
   if (taskTurnsMatch) {
     const taskName = decodeURIComponent(taskTurnsMatch[1]);

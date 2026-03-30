@@ -115,6 +115,29 @@ function migrate(db: Database.Database): void {
       last_synced_id INTEGER NOT NULL DEFAULT 0,
       last_synced_at TEXT
     );
+
+    CREATE TABLE IF NOT EXISTS work_segments (
+      id                        INTEGER PRIMARY KEY AUTOINCREMENT,
+      commit_sha                TEXT NOT NULL,
+      commit_message            TEXT NOT NULL,
+      project_path              TEXT,
+      changed_files             TEXT,           -- JSON array of strings
+      from_timestamp            TEXT NOT NULL,
+      to_timestamp              TEXT NOT NULL,
+      turn_count                INTEGER DEFAULT 0,
+      summary                   TEXT,
+      type                      TEXT,           -- bugfix|feature|refactor|exploration|docs|other
+      area                      TEXT,
+      tags                      TEXT,           -- JSON array
+      classifier_model          TEXT,
+      classifier_input_tokens   INTEGER DEFAULT 0,
+      classifier_output_tokens  INTEGER DEFAULT 0,
+      classifier_cost_usd       REAL DEFAULT 0,
+      created_at                TEXT NOT NULL,
+      UNIQUE(commit_sha, project_path)
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_work_segments_project ON work_segments(project_path, created_at DESC);
   `);
 }
 
@@ -195,4 +218,24 @@ export type TaskTagRow = {
   turn_id: number;
   task: string;
   tagged_at: string;
+};
+
+export type WorkSegmentRow = {
+  id: number;
+  commit_sha: string;
+  commit_message: string;
+  project_path: string | null;
+  changed_files: string | null;       // JSON array
+  from_timestamp: string;
+  to_timestamp: string;
+  turn_count: number;
+  summary: string | null;
+  type: string | null;
+  area: string | null;
+  tags: string | null;                // JSON array
+  classifier_model: string | null;
+  classifier_input_tokens: number;
+  classifier_output_tokens: number;
+  classifier_cost_usd: number;
+  created_at: string;
 };
