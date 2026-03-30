@@ -6,13 +6,11 @@ import { installHooksToSettings, uninstallHooksFromSettings, generateHooksConfig
 import { installOtelToSettings, uninstallOtelFromSettings, generateOtelShellExports } from "../otel/config.js";
 import { ingestAllSessions } from "../parser/ingest.js";
 import { watchSessionFiles } from "../parser/watcher.js";
-import { formatSessionList, formatSessionDetail, formatStats } from "./format.js";
 import { installService, uninstallService, serviceStatus, restartService } from "../service/index.js";
 import { getActiveContext, setActiveContext, clearActiveContext } from "../context/index.js";
 import { installGitHook, uninstallGitHook } from "../hooks/git.js";
 import { runSync } from "../sync/index.js";
 import { ZozulApiClient } from "../sync/client.js";
-import { remoteDashboardHtml } from "../dashboard/html.js";
 
 function envPort(): string {
   return process.env.ZOZUL_PORT ?? "7890";
@@ -50,6 +48,16 @@ export function buildCli(): Command {
       const repo = new SessionRepo(db);
       const server = createHookServer({ port, repo, verbose });
 
+      server.on("error", (err: NodeJS.ErrnoException) => {
+        if (err.code === "EADDRINUSE") {
+          console.error(`Port ${port} is already in use. Is zozul already running?`);
+          console.error("  Check with: lsof -ti :" + port);
+          db.close();
+          process.exit(0); // clean exit so launchd/systemd won't respawn
+        }
+        throw err;
+      });
+
       server.listen(port, async () => {
         console.log(`zozul listening on http://localhost:${port}`);
         console.log(`  Dashboard:     http://localhost:${port}/dashboard`);
@@ -71,15 +79,43 @@ export function buildCli(): Command {
 
   program
     .command("install")
-    .description("Install hooks and OTEL config into Claude Code settings.json")
+    .description("Install hooks, OTEL config, and optionally the background service")
     .option("-p, --port <port>", "Hook server port", envPort())
     .option("--otel-endpoint <endpoint>", "OTLP endpoint", envOtelEndpoint())
     .option("--otel-protocol <protocol>", "OTLP protocol", envOtelProtocol())
     .option("--no-otel", "Skip OTEL configuration")
     .option("--no-hooks", "Skip hooks configuration")
     .option("--service", "Also install zozul as a background service (starts on login)")
+    .option("--status", "Show background service status")
+    .option("--restart", "Restart the background service")
+    .option("--dry-run", "Print the config that would be installed without writing")
     .action((opts) => {
+      if (opts.status) {
+        console.log(`Service status: ${serviceStatus()}`);
+        return;
+      }
+
+      if (opts.restart) {
+        try {
+          restartService();
+          console.log("Service restarted.");
+          console.log(`  Status: ${serviceStatus()}`);
+        } catch (err) {
+          console.error(`Restart failed: ${err instanceof Error ? err.message : err}`);
+          process.exit(1);
+        }
+        return;
+      }
+
       const port = parseInt(opts.port, 10);
+
+      if (opts.dryRun) {
+        console.log("── Hooks Config (for ~/.claude/settings.json) ──\n");
+        console.log(JSON.stringify(generateHooksConfig({ port }), null, 2));
+        console.log("\n── OTEL Environment Variables ──\n");
+        console.log(generateOtelShellExports({ endpoint: opts.otelEndpoint }));
+        return;
+      }
 
       if (opts.hooks !== false) {
         const result = installHooksToSettings({ port });
@@ -124,160 +160,27 @@ export function buildCli(): Command {
 
   program
     .command("uninstall")
-    .description("Remove zozul hooks and OTEL config from Claude Code settings.json")
+    .description("Remove zozul hooks, OTEL config, and background service")
     .option("-p, --port <port>", "Hook server port (to match installed hooks)", envPort())
-    .option("--service", "Also stop and remove the background service")
     .action((opts) => {
       const port = parseInt(opts.port, 10);
 
       const hooksRemoved = uninstallHooksFromSettings({ port });
       const otelRemoved = uninstallOtelFromSettings();
-
       const gitRemoved = uninstallGitHook();
 
       if (hooksRemoved) console.log("Hooks removed from Claude Code settings.");
       if (otelRemoved) console.log("OTEL config removed from Claude Code settings.");
       if (gitRemoved) console.log("Git post-commit hook removed.");
-      if (!hooksRemoved && !otelRemoved && !gitRemoved) console.log("Nothing to remove.");
 
-      if (opts.service) {
-        const result = uninstallService();
-        if (result.removed) {
-          console.log("Background service stopped and removed.");
-        } else {
-          console.log("No background service found.");
-        }
-      }
-    });
-
-  program
-    .command("service-status")
-    .description("Show whether the zozul background service is installed and running")
-    .action(() => {
-      console.log(`Service status: ${serviceStatus()}`);
-    });
-
-  program
-    .command("restart")
-    .description("Restart the zozul background service")
-    .action(() => {
-      try {
-        restartService();
-        console.log("Service restarted.");
-        console.log(`  Status: ${serviceStatus()}`);
-      } catch (err) {
-        console.error(`Restart failed: ${err instanceof Error ? err.message : err}`);
-        process.exit(1);
-      }
-    });
-
-  program
-    .command("ingest")
-    .description("Parse all Claude Code session JSONL files into the local database")
-    .option("-f, --force", "Re-ingest sessions that already exist in the database")
-    .option("--no-tag", "Skip tagging turns with the active task context")
-    .action(async (opts) => {
-      const db = getDb(envDbPath());
-      const repo = new SessionRepo(db);
-
-      console.log("Scanning for Claude Code session files...");
-      const result = await ingestAllSessions(repo, { force: opts.force, noTag: opts.tag === false });
-      console.log(`Ingested: ${result.ingested}  Skipped: ${result.skipped}`);
-      db.close();
-    });
-
-  program
-    .command("sessions")
-    .description("List recorded sessions")
-    .option("-n, --limit <n>", "Number of sessions to show", "20")
-    .action((opts) => {
-      const db = getDb(envDbPath());
-      const repo = new SessionRepo(db);
-
-      const sessions = repo.listSessions(parseInt(opts.limit, 10));
-      console.log(formatSessionList(sessions));
-      db.close();
-    });
-
-  program
-    .command("session <id>")
-    .description("Show details for a specific session")
-    .action((id: string) => {
-      const db = getDb(envDbPath());
-      const repo = new SessionRepo(db);
-
-      const session = repo.getSession(id);
-      if (!session) {
-        console.error(`Session not found: ${id}`);
-        process.exit(1);
+      const serviceResult = uninstallService();
+      if (serviceResult.removed) {
+        console.log("Background service stopped and removed.");
       }
 
-      const turns = repo.getSessionTurns(id);
-      console.log(formatSessionDetail(session, turns));
-      db.close();
-    });
-
-  program
-    .command("stats")
-    .description("Show aggregate statistics across all sessions")
-    .action(() => {
-      const db = getDb(envDbPath());
-      const repo = new SessionRepo(db);
-
-      const stats = repo.getAggregateStats() as Record<string, unknown>;
-      console.log(formatStats(stats));
-      db.close();
-    });
-
-  program
-    .command("db-clean")
-    .description("Remove known invalid/test rows from the database")
-    .option("--session <id>", "Remove all data for a specific session ID")
-    .action((opts) => {
-      const db = getDb(envDbPath());
-
-      if (opts.session) {
-        const id: string = opts.session;
-        db.transaction(() => {
-          db.prepare(`DELETE FROM task_tags WHERE turn_id IN (SELECT id FROM turns WHERE session_id = ?)`).run(id);
-          for (const table of ["otel_metrics", "otel_events", "hook_events", "tool_uses", "turns"] as const) {
-            db.prepare(`DELETE FROM ${table} WHERE session_id = ?`).run(id);
-          }
-          db.prepare(`DELETE FROM sessions WHERE id = ?`).run(id);
-        })();
-        console.log(`Removed all data for session: ${id}`);
-      } else {
-        // Remove rows where the timestamp is clearly from the wrong year
-        // or the session_id looks like a test fixture
-        const minDate = "2025-01-01";
-        const result = db.prepare(`
-          SELECT COUNT(*) as n FROM otel_metrics WHERE timestamp < ?
-        `).get(minDate) as { n: number };
-        if (result.n === 0) {
-          console.log("Nothing to clean.");
-        } else {
-          db.prepare(`DELETE FROM otel_metrics WHERE timestamp < ?`).run(minDate);
-          db.prepare(`DELETE FROM otel_events  WHERE timestamp < ?`).run(minDate);
-          console.log(`Removed ${result.n} row(s) with timestamps before ${minDate}.`);
-        }
+      if (!hooksRemoved && !otelRemoved && !gitRemoved && !serviceResult.removed) {
+        console.log("Nothing to remove.");
       }
-
-      db.close();
-    });
-
-  program
-    .command("show-config")
-    .description("Print the hooks and OTEL configuration that would be installed")
-    .option("-p, --port <port>", "Hook server port", envPort())
-    .option("--otel-endpoint <endpoint>", "OTLP endpoint", envOtelEndpoint())
-    .action((opts) => {
-      const port = parseInt(opts.port, 10);
-
-      console.log("── Hooks Config (for ~/.claude/settings.json) ──\n");
-      console.log(JSON.stringify(generateHooksConfig({ port }), null, 2));
-
-      console.log("\n── OTEL Environment Variables ──\n");
-      console.log(generateOtelShellExports({ endpoint: opts.otelEndpoint }));
     });
 
   program
@@ -374,36 +277,55 @@ export function buildCli(): Command {
       db.close();
     });
 
-  program
-    .command("dashboard")
-    .description("Open a local dashboard backed by the remote zozul backend")
-    .option("-p, --port <port>", "Port to serve the dashboard on", "3333")
-    .action(async (opts) => {
-      const apiUrl = process.env.ZOZUL_API_URL;
-      const apiKey = process.env.ZOZUL_API_KEY;
+  // ── Hidden maintenance commands ──
 
-      if (!apiUrl || !apiKey) {
-        console.error("Missing required environment variables:");
-        if (!apiUrl) console.error("  ZOZUL_API_URL — base URL of the zozul backend");
-        if (!apiKey) console.error("  ZOZUL_API_KEY — API key for authentication");
-        console.error("\nSet them in .env or export them in your shell.");
-        process.exit(1);
+  program
+    .command("ingest", { hidden: true })
+    .description("Re-ingest all Claude Code session files (backfill)")
+    .option("-f, --force", "Re-ingest sessions that already exist in the database")
+    .option("--no-tag", "Skip tagging turns with the active task context")
+    .action(async (opts) => {
+      const db = getDb(envDbPath());
+      const repo = new SessionRepo(db);
+
+      console.log("Scanning for Claude Code session files...");
+      const result = await ingestAllSessions(repo, { force: opts.force, noTag: opts.tag === false });
+      console.log(`Ingested: ${result.ingested}  Skipped: ${result.skipped}`);
+      db.close();
+    });
+
+  program
+    .command("db-clean", { hidden: true })
+    .description("Remove invalid/test rows from the database")
+    .option("--session <id>", "Remove all data for a specific session ID")
+    .action((opts) => {
+      const db = getDb(envDbPath());
+
+      if (opts.session) {
+        const id: string = opts.session;
+        db.transaction(() => {
+          db.prepare(`DELETE FROM task_tags WHERE turn_id IN (SELECT id FROM turns WHERE session_id = ?)`).run(id);
+          for (const table of ["otel_metrics", "otel_events", "hook_events", "tool_uses", "turns"] as const) {
+            db.prepare(`DELETE FROM ${table} WHERE session_id = ?`).run(id);
+          }
+          db.prepare(`DELETE FROM sessions WHERE id = ?`).run(id);
+        })();
+        console.log(`Removed all data for session: ${id}`);
+      } else {
+        const minDate = "2025-01-01";
+        const result = db.prepare(`
+          SELECT COUNT(*) as n FROM otel_metrics WHERE timestamp < ?
+        `).get(minDate) as { n: number };
+        if (result.n === 0) {
+          console.log("Nothing to clean.");
+        } else {
+          db.prepare(`DELETE FROM otel_metrics WHERE timestamp < ?`).run(minDate);
+          db.prepare(`DELETE FROM otel_events  WHERE timestamp < ?`).run(minDate);
+          console.log(`Removed ${result.n} row(s) with timestamps before ${minDate}.`);
+        }
       }
 
-      const port = parseInt(opts.port, 10);
-      const html = remoteDashboardHtml(apiUrl, apiKey);
-
-      const { createServer } = await import("node:http");
-      const server = createServer((_, res) => {
-        res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
-        res.end(html);
-      });
-
-      server.listen(port, () => {
-        console.log(`Dashboard: http://localhost:${port}`);
-        console.log(`Backend:   ${apiUrl}`);
-        console.log("\nPress Ctrl+C to stop.");
-      });
+      db.close();
     });
 
   return program;
