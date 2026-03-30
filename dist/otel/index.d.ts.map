@@ -1,1 +1,0 @@
-{"version":3,"file":"index.d.ts","sourceRoot":"","sources":["../../src/otel/index.ts"],"names":[],"mappings":"AAAA,OAAO,EACL,mBAAmB,EACnB,wBAAwB,EACxB,qBAAqB,EACrB,yBAAyB,GAC1B,MAAM,aAAa,CAAC;AACrB,YAAY,EAAE,UAAU,EAAE,MAAM,aAAa,CAAC;AAC9C,OAAO,EAAE,iBAAiB,EAAE,cAAc,EAAE,MAAM,eAAe,CAAC"}
