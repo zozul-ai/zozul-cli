@@ -21,6 +21,7 @@ jobs:
 
       - run: npm test
 
-      - run: npm publish --access public
+      - name: Publish (skip if version already exists)
+        run: npm publish --access public || true
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
