@@ -235,9 +235,11 @@ updated_at TEXT
 
 **JSONL file paths use lossy encoding.** Claude Code replaces `/` with `-` in project directory names. `decodeProjectPath` reverses this, but hyphens in original paths become `/`. This is unavoidable with Claude Code's current encoding scheme.
 
-**Proportional cost replaces `turns.cost_usd` in queries.** Since `costUSD` in JSONL is always 0, per-turn cost is estimated as `session.total_cost_usd * (turn_all_tokens / session_all_tokens)` where all_tokens includes input, output, cache_read, and cache_creation. This is defined as `PROPORTIONAL_COST_SQL` in `repo.ts` and used in `getStatsByTask`, `getStatsByTasks`, `getTaggedTurns`, and `getTurnBlock`. Coverage is ~95% — turns with no JSONL token data get $0.
+**Proportional cost replaces `turns.cost_usd` in queries.** Since `costUSD` in JSONL is always 0, per-turn cost is estimated as `session.total_cost_usd * (turn_all_tokens / session_all_tokens)` where all_tokens includes input, output, cache_read, and cache_creation. Both the local server (`PROPORTIONAL_COST_SQL` in `repo.ts`) and the remote API compute this server-side. Coverage is ~95% — turns with no JSONL token data get $0.
 
-**Dashboard auto-detects data source.** When `ZOZUL_API_URL` and `ZOZUL_API_KEY` are set, `html.ts` injects `ZOZUL_CONFIG` into the dashboard. On load, the dashboard health-checks the remote API (3s timeout). If available, it routes `fetchJson` calls to the remote; if any remote call fails, it falls back to local for that request. A badge in the header shows "Remote" or "Local".
+**Dashboard auto-detects data source.** When `ZOZUL_API_URL` and `ZOZUL_API_KEY` are set, `html.ts` injects `ZOZUL_CONFIG` into the dashboard. On load, the dashboard health-checks the remote API at `/api/v1/health` (3s timeout). If available, it routes `fetchJson` calls to the remote; if any remote call fails, it falls back to local for that request. A badge in the header shows "Remote" or "Local".
+
+**Dashboard has four views.** Summary (cost chart, project breakdown, stat cards), Tasks (tag-combination groups from `/task-groups`), Tags (per-tag stats), Sessions (sortable/filterable table). All views except Sessions support time window filtering (7d/30d/All) via `?from=&to=` params. The dashboard uses only endpoints that exist on both the local and remote API — no local-only endpoints.
 
 ---
 
@@ -266,17 +268,18 @@ All served by `hooks/server.ts` on port 7890.
 |---|---|---|
 | GET | `/health` | Health check — returns `{ status: "ok" }` |
 | GET | `/dashboard` | Dashboard HTML (injects `ZOZUL_CONFIG` when `ZOZUL_API_URL` / `ZOZUL_API_KEY` are set) |
-| GET | `/api/stats` | Aggregate stats — sessions, tokens, cost, user prompts, interruptions |
-| GET | `/api/sessions` | Paginated session list — returns `{ sessions, total, limit, offset }` |
+| GET | `/api/stats` | Aggregate stats. Accepts `?from=ISO&to=ISO` to filter by `sessions.started_at` |
+| GET | `/api/sessions` | Paginated session list. Accepts `?limit=N&offset=N&from=ISO&to=ISO` |
 | GET | `/api/sessions/:id` | Single session row |
 | GET | `/api/sessions/:id/turns` | Turns for a session |
 | GET | `/api/context` | Active task context (`~/.zozul/context.json`) |
+| GET | `/api/task-groups` | Task groups by tag combination. Accepts `?from=ISO&to=ISO`. Returns `[{ tags, turn_count, human_interventions, total_duration_ms, total_cost_usd, last_seen }]`. Includes `Untagged` group |
 | GET | `/api/tasks` | List distinct tags with turn counts, first/last tagged timestamps |
 | GET | `/api/tasks/stats` | Multi-tag cost/token stats — `?tags=X,Y&mode=all\|any&from=ISO&to=ISO` |
-| GET | `/api/tasks/turns` | Paginated turns filtered by tags — `?tags=X&mode=any&limit=N&offset=N` |
+| GET | `/api/tasks/turns` | Paginated turns filtered by tags — `?tags=X&mode=any&limit=N&offset=N&from=ISO&to=ISO`. Returns `block_cost_usd`, `block_cache_read_tokens`, `block_cache_creation_tokens` per turn |
 | GET | `/api/tasks/:name/stats` | Per-tag cost/token breakdown |
 | GET | `/api/tasks/:name/turns` | Paginated turns for a single tag |
-| GET | `/api/turns/:id/block` | Turn block — all turns from a user prompt to the next user prompt |
+| GET | `/api/turns/:id/block` | Turn block — all turns from a user prompt to the next. Returns `estimated_cost_usd` per turn |
 | GET | `/api/metrics/tokens` | Token time-series from `otel_metrics` |
 | GET | `/api/metrics/cost` | Cost time-series from `otel_metrics` |
 | GET | `/api/metrics/tools` | Tool usage breakdown from `tool_uses` |
@@ -285,11 +288,13 @@ All served by `hooks/server.ts` on port 7890.
 | POST | `/v1/logs` | OTLP logs receiver |
 | POST | `/hook/:event` | Claude Code hook receiver |
 
-`/api/sessions` accepts `?limit=N` (default 50, max 500) and `?offset=N`. The response envelope `{ sessions, total, limit, offset }` lets the dashboard implement Load More without a separate count query.
+**Pagination**: `/api/sessions` accepts `?limit=N` (default 50, max 500) and `?offset=N`. The response envelope `{ sessions, total, limit, offset }` lets the dashboard implement Load More without a separate count query.
 
-Time-series endpoints accept `?range=7d`, `?range=24h`, or `?from=ISO&to=ISO&step=5m`. Step auto-selects based on range if omitted.
+**Time filtering**: endpoints that accept `?from=ISO&to=ISO` filter inclusively. `/api/stats` and `/api/sessions` filter on `sessions.started_at`. `/api/task-groups`, `/api/tasks/stats`, and `/api/tasks/turns` filter on `turns.timestamp`. Both params must be provided together or neither.
 
-Task stats endpoints use proportional cost: `session_cost * turn_tokens / session_total_tokens` (including cache tokens) instead of `turns.cost_usd` which is always 0 from JSONL.
+**Time-series**: `/api/metrics/cost` and `/api/metrics/tokens` accept `?range=7d`, `?range=24h`, or `?from=ISO&to=ISO&step=5m`. Step auto-selects based on range if omitted.
+
+**Proportional cost**: all cost fields in task/turn queries use `session_cost * turn_all_tokens / session_all_tokens` (including cache tokens) instead of `turns.cost_usd` which is always 0 from JSONL. The remote API also computes this server-side. Locally defined as `PROPORTIONAL_COST_SQL` in `repo.ts`.
 
 ---
 
@@ -361,15 +366,7 @@ Logs: `~/.zozul/zozul.log`
 
 ## Task context tagging
 
-`zozul context "tag1" "tag2"` writes `{ active: string[], set_at: string }` to `~/.zozul/context.json`. Tags are applied during JSONL ingest to all turns whose `timestamp >= set_at`. Context is cleared automatically by a git `post-commit` hook installed by `zozul install` (marker: `# zozul: auto-clear context on commit`).
-
-API:
-- `GET /api/context` — current active context
-- `GET /api/tasks` — list all distinct tag names with turn counts
-- `GET /api/tasks/:name/turns` — turns for a tag, paginated (`?limit&offset`)
-- `GET /api/tasks/:name/stats` — cost/token breakdown for a tag
-- `GET /api/tasks/turns` — cross-tag turn query (`?tags=a,b&mode=any|all`)
-- `GET /api/tasks/stats` — multi-tag stats query
+`zozul context "tag1" "tag2"` writes `{ active: string[], set_at: string }` to `~/.zozul/context.json`. Tags are applied during JSONL ingest to all turns whose `timestamp >= set_at`. Context is cleared automatically by a git `post-commit` hook installed by `zozul install` (marker: `# zozul: auto-clear context on commit`). Also auto-cleared when Claude runs `git commit` or `git push` (via PostToolUse hook handler in `server.ts`).
 
 Source: `src/context/index.ts` (context read/write), `src/hooks/git.ts` (hook install).
 
@@ -383,7 +380,6 @@ Source: `src/context/index.ts` (context read/write), `src/hooks/git.ts` (hook in
 - **JSONL path decoding is lossy**: hyphens in project directory names decode incorrectly. No fix without changes to Claude Code.
 - **OTEL cost history is unrecoverable**: if zozul wasn't running during a session, cost data for that period is permanently lost.
 - **`tool_uses.success` and `tool_uses.duration_ms` are never populated**: the schema has these columns but nothing writes to them yet.
-- **Session filter is client-side only**: the filter input searches loaded sessions; Load More fetches additional pages.
 
 ---
 
