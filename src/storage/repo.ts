@@ -1,6 +1,22 @@
 import type Database from "better-sqlite3";
 import type { SessionRow, TurnRow, ToolUseRow, HookEventRow, OtelMetricRow, OtelEventRow, TaskTagRow } from "./db.js";
 
+/**
+ * SQL expression that estimates per-turn cost by distributing the session's
+ * OTEL-accumulated total_cost_usd proportionally based on ALL token types
+ * (input, output, cache_read, cache_creation).
+ * Requires tables aliased as `t` (turns) and `s` (sessions).
+ */
+const PROPORTIONAL_COST_SQL = `
+  CASE WHEN COALESCE(s.total_input_tokens, 0) + COALESCE(s.total_output_tokens, 0)
+          + COALESCE(s.total_cache_read_tokens, 0) + COALESCE(s.total_cache_creation_tokens, 0) > 0
+  THEN s.total_cost_usd
+       * CAST(COALESCE(t.input_tokens, 0) + COALESCE(t.output_tokens, 0)
+            + COALESCE(t.cache_read_tokens, 0) + COALESCE(t.cache_creation_tokens, 0) AS REAL)
+       / (COALESCE(s.total_input_tokens, 0) + COALESCE(s.total_output_tokens, 0)
+        + COALESCE(s.total_cache_read_tokens, 0) + COALESCE(s.total_cache_creation_tokens, 0))
+  ELSE 0 END`;
+
 export class SessionRepo {
   constructor(private db: Database.Database) {}
 
@@ -353,14 +369,23 @@ export class SessionRepo {
     ).all(turnId) as TaskTagRow[];
   }
 
-  getTurnsByTask(task: string, limit = 50, offset = 0): TurnRow[] {
+  getTurnsByTask(task: string, limit = 50, offset = 0): (TurnRow & { block_input_tokens: number; block_output_tokens: number; block_cache_read_tokens: number; block_cache_creation_tokens: number })[] {
+    const blockWhere = `b.session_id = t.session_id AND b.turn_index >= t.turn_index
+           AND b.turn_index < COALESCE(
+             (SELECT MIN(n.turn_index) FROM turns n WHERE n.session_id = t.session_id AND n.turn_index > t.turn_index AND n.is_real_user = 1),
+             999999)`;
     return this.db.prepare(`
-      SELECT t.* FROM turns t
+      SELECT t.*,
+        (SELECT COALESCE(SUM(b.input_tokens), 0) FROM turns b WHERE ${blockWhere}) as block_input_tokens,
+        (SELECT COALESCE(SUM(b.output_tokens), 0) FROM turns b WHERE ${blockWhere}) as block_output_tokens,
+        (SELECT COALESCE(SUM(b.cache_read_tokens), 0) FROM turns b WHERE ${blockWhere}) as block_cache_read_tokens,
+        (SELECT COALESCE(SUM(b.cache_creation_tokens), 0) FROM turns b WHERE ${blockWhere}) as block_cache_creation_tokens
+      FROM turns t
       JOIN task_tags tt ON tt.turn_id = t.id
-      WHERE tt.task = ?
+      WHERE tt.task = ? AND t.is_real_user = 1
       ORDER BY t.timestamp DESC
       LIMIT ? OFFSET ?
-    `).all(task, limit, offset) as TurnRow[];
+    `).all(task, limit, offset) as (TurnRow & { block_input_tokens: number; block_output_tokens: number; block_cache_read_tokens: number; block_cache_creation_tokens: number })[];
   }
 
   getTaggedTurns(opts: {
@@ -370,7 +395,7 @@ export class SessionRepo {
     to?: string;
     limit?: number;
     offset?: number;
-  } = {}): (TurnRow & { tags: string; block_input_tokens: number; block_output_tokens: number; block_cost_usd: number })[] {
+  } = {}): (TurnRow & { tags: string; block_input_tokens: number; block_output_tokens: number; block_cache_read_tokens: number; block_cache_creation_tokens: number })[] {
     const { tags, mode = "any", from, to, limit = 50, offset = 0 } = opts;
     const conditions: string[] = [];
     const params: unknown[] = [];
@@ -402,33 +427,23 @@ export class SessionRepo {
     const where = conditions.length > 0 ? "WHERE " + conditions.join(" AND ") : "";
     params.push(limit, offset);
 
-    // Aggregate block stats: sum tokens/cost from this turn to the next real user turn
+    // Aggregate block stats: sum tokens from this turn to the next real user turn
+    const blockWhere = `b.session_id = t.session_id AND b.turn_index >= t.turn_index
+           AND b.turn_index < COALESCE(
+             (SELECT MIN(n.turn_index) FROM turns n WHERE n.session_id = t.session_id AND n.turn_index > t.turn_index AND n.is_real_user = 1),
+             999999)`;
     return this.db.prepare(`
       SELECT t.*,
         (SELECT GROUP_CONCAT(tt2.task, ', ') FROM task_tags tt2 WHERE tt2.turn_id = t.id) as tags,
-        (SELECT COALESCE(SUM(b.input_tokens), 0) FROM turns b
-         WHERE b.session_id = t.session_id AND b.turn_index >= t.turn_index
-           AND b.turn_index < COALESCE(
-             (SELECT MIN(n.turn_index) FROM turns n WHERE n.session_id = t.session_id AND n.turn_index > t.turn_index AND n.is_real_user = 1),
-             999999)
-        ) as block_input_tokens,
-        (SELECT COALESCE(SUM(b.output_tokens), 0) FROM turns b
-         WHERE b.session_id = t.session_id AND b.turn_index >= t.turn_index
-           AND b.turn_index < COALESCE(
-             (SELECT MIN(n.turn_index) FROM turns n WHERE n.session_id = t.session_id AND n.turn_index > t.turn_index AND n.is_real_user = 1),
-             999999)
-        ) as block_output_tokens,
-        (SELECT COALESCE(SUM(b.cost_usd), 0) FROM turns b
-         WHERE b.session_id = t.session_id AND b.turn_index >= t.turn_index
-           AND b.turn_index < COALESCE(
-             (SELECT MIN(n.turn_index) FROM turns n WHERE n.session_id = t.session_id AND n.turn_index > t.turn_index AND n.is_real_user = 1),
-             999999)
-        ) as block_cost_usd
+        (SELECT COALESCE(SUM(b.input_tokens), 0) FROM turns b WHERE ${blockWhere}) as block_input_tokens,
+        (SELECT COALESCE(SUM(b.output_tokens), 0) FROM turns b WHERE ${blockWhere}) as block_output_tokens,
+        (SELECT COALESCE(SUM(b.cache_read_tokens), 0) FROM turns b WHERE ${blockWhere}) as block_cache_read_tokens,
+        (SELECT COALESCE(SUM(b.cache_creation_tokens), 0) FROM turns b WHERE ${blockWhere}) as block_cache_creation_tokens
       FROM turns t
       ${where}
       ORDER BY t.timestamp DESC
       LIMIT ? OFFSET ?
-    `).all(...params) as (TurnRow & { tags: string; block_input_tokens: number; block_output_tokens: number; block_cost_usd: number })[];
+    `).all(...params) as (TurnRow & { tags: string; block_input_tokens: number; block_output_tokens: number; block_cache_read_tokens: number; block_cache_creation_tokens: number })[];
   }
 
   getTurnBlock(turnId: number): TurnRow[] {
@@ -445,9 +460,11 @@ export class SessionRepo {
     const maxIndex = nextRealUser ? nextRealUser.turn_index : 999999;
 
     return this.db.prepare(`
-      SELECT * FROM turns
-      WHERE session_id = ? AND turn_index >= ? AND turn_index < ?
-      ORDER BY turn_index ASC
+      SELECT t.*, ${PROPORTIONAL_COST_SQL} as estimated_cost_usd
+      FROM turns t
+      JOIN sessions s ON s.id = t.session_id
+      WHERE t.session_id = ? AND t.turn_index >= ? AND t.turn_index < ?
+      ORDER BY t.turn_index ASC
     `).all(turn.session_id, turn.turn_index, maxIndex) as TurnRow[];
   }
 
@@ -462,10 +479,11 @@ export class SessionRepo {
         SUM(t.input_tokens) as total_input_tokens,
         SUM(t.output_tokens) as total_output_tokens,
         SUM(t.cache_read_tokens) as total_cache_read_tokens,
-        SUM(t.cost_usd) as total_cost_usd,
+        SUM(${PROPORTIONAL_COST_SQL}) as total_cost_usd,
         SUM(t.duration_ms) as total_duration_ms
       FROM turns t
       JOIN task_tags tt ON tt.turn_id = t.id
+      JOIN sessions s ON s.id = t.session_id
       WHERE tt.task = ?${timeFilter}
     `).get(...params);
   }
@@ -484,9 +502,10 @@ export class SessionRepo {
           SUM(t.input_tokens) as total_input_tokens,
           SUM(t.output_tokens) as total_output_tokens,
           SUM(t.cache_read_tokens) as total_cache_read_tokens,
-          SUM(t.cost_usd) as total_cost_usd,
+          SUM(${PROPORTIONAL_COST_SQL}) as total_cost_usd,
           SUM(t.duration_ms) as total_duration_ms
         FROM turns t
+        JOIN sessions s ON s.id = t.session_id
         WHERE t.id IN (
           SELECT DISTINCT turn_id FROM task_tags WHERE task IN (${placeholders})
         )${timeFilter}
@@ -499,9 +518,10 @@ export class SessionRepo {
         SUM(t.input_tokens) as total_input_tokens,
         SUM(t.output_tokens) as total_output_tokens,
         SUM(t.cache_read_tokens) as total_cache_read_tokens,
-        SUM(t.cost_usd) as total_cost_usd,
+        SUM(${PROPORTIONAL_COST_SQL}) as total_cost_usd,
         SUM(t.duration_ms) as total_duration_ms
       FROM turns t
+      JOIN sessions s ON s.id = t.session_id
       WHERE t.id IN (
         SELECT turn_id FROM task_tags
         WHERE task IN (${placeholders})
