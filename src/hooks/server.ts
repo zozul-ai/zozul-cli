@@ -87,12 +87,22 @@ export function createHookServer(opts: HookServerOptions): http.Server {
           return;
         }
 
-        // POST /api/retag — re-run tag-blocks for a session
+        // POST /api/retag — re-run tag-blocks for a session or project
         if (method === "POST" && path === "/api/retag") {
           const body = await readBody(req);
           let sessionId: string | undefined;
-          try { sessionId = (JSON.parse(body) as { session_id?: string }).session_id; } catch { /* ignore */ }
-          tagBlocks(repo, { sessionId, verbose }).catch(() => {});
+          let projectPath: string | undefined;
+          try {
+            const parsed = JSON.parse(body) as { session_id?: string; project_path?: string };
+            sessionId = parsed.session_id;
+            projectPath = parsed.project_path;
+          } catch { /* ignore */ }
+          // Must provide either session_id or project_path — refuse to retag everything
+          if (!sessionId && !projectPath) {
+            sendJson(res, 400, { error: "Provide session_id or project_path" });
+            return;
+          }
+          tagBlocks(repo, { sessionId, projectPath, verbose }).catch(() => {});
           sendJson(res, 202, { ok: true });
           return;
         }

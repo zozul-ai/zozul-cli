@@ -678,6 +678,7 @@ async function loadDashboard() {
     allSessions = sessionsArr;
     sessionsTotal = Array.isArray(sessionsResp) ? sessionsArr.length : sessionsResp.total;
     sessionsOffset = allSessions.length;
+    window._projectPath = stats?.most_active_project ?? null;
     renderStats(stats);
     renderTasks(tasks, activeCtx);
     renderSessions(allSessions);
@@ -1330,11 +1331,16 @@ loadDashboard().then(() => { scheduleAutoRefresh(); scheduleTagsPoll(); });
 // ── Tag runs + retag ──
 
 async function retagSessions(btn) {
+  const sessionId = btn && btn.dataset.sessionId;
+  if (!sessionId && !confirm('Re-tag all sessions for this project? This may take a minute.')) return;
   if (btn) { btn.textContent = 'Retagging…'; btn.disabled = true; }
   try {
-    await fetch('/api/retag', { method: 'POST', headers: {'Content-Type':'application/json'}, body: '{}' });
+    const body = sessionId
+      ? { session_id: sessionId }
+      : { project_path: window._projectPath };
+    await fetch('/api/retag', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify(body) });
   } finally {
-    if (btn) { setTimeout(() => { btn.textContent = 'Retag'; btn.disabled = false; }, 2000); }
+    if (btn) { setTimeout(() => { btn.textContent = sessionId ? 'Retag' : 'Retag all'; btn.disabled = false; }, 2000); }
   }
 }
 

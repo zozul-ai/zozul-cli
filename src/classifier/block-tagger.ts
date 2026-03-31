@@ -48,11 +48,13 @@ function buildSegmentationPrompt(userTurns: TurnRow[], existingTags: string[]): 
 ]`);
   lines.push("");
   lines.push("Rules:");
-  lines.push("- turns: 1-based indices, must be contiguous, every turn in exactly one segment");
+  lines.push("- turns: 1-based indices, contiguous, every turn appears in exactly one segment");
+  lines.push("- You MUST split into multiple segments wherever the topic or area changes — never put all turns in one segment");
+  lines.push("- Aim for 3-8 segments per 50 turns; a single segment for all turns is always wrong");
   lines.push("- tags: high-level product area only — e.g. storage, dashboard, classifier, hooks, sync, cli, otel, parser");
   lines.push("- NOT techniques or patterns: debugging, refactoring, prompt-engineering, schema-migration");
   lines.push("- 1-3 tags per segment, reuse existing vocabulary where it fits");
-  lines.push("- Merge short clarification turns into the surrounding segment, don't create 1-turn segments");
+  lines.push("- Merge short 1-2 turn clarifications into the surrounding segment");
 
   return lines.join("\n");
 }

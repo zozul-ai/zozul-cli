@@ -190,7 +190,9 @@ export class SessionRepo {
         (SELECT SUM(total_turns)                 FROM sessions) as total_turns,
         (SELECT SUM(total_duration_ms)           FROM sessions) as total_duration_ms,
         (SELECT COUNT(*) FROM hook_events WHERE event_name = 'UserPromptSubmit') as total_user_prompts,
-        (SELECT COUNT(*) FROM hook_events WHERE event_name = 'Stop') as total_interruptions
+        (SELECT COUNT(*) FROM hook_events WHERE event_name = 'Stop') as total_interruptions,
+        (SELECT project_path FROM sessions WHERE project_path IS NOT NULL
+         GROUP BY project_path ORDER BY COUNT(*) DESC LIMIT 1) as most_active_project
     `).get();
   }
 
