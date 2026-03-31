@@ -33,8 +33,8 @@ src/
     watcher.ts          fs.watch on ~/.claude/projects, debounced ingest
     types.ts            JSONL type definitions
   dashboard/
-    index.html          Dashboard SPA (vanilla JS, Chart.js from CDN)
-    html.ts             Reads and serves index.html (thin wrapper)
+    index.html          Dashboard SPA (vanilla JS, Chart.js from CDN). Four views: Summary, Tasks, Tags, Sessions. Auto-fallback between remote and local API.
+    html.ts             Reads and serves index.html; injects ZOZUL_CONFIG for remote API auto-detection when env vars are set
   service/
     index.ts            Install/uninstall as launchd (macOS) or systemd (Linux) service
 ```
@@ -205,6 +205,10 @@ timestamp TEXT
 
 **JSONL file paths use lossy encoding.** Claude Code replaces `/` with `-` in project directory names. `decodeProjectPath` reverses this, but hyphens in original paths become `/`. This is unavoidable with Claude Code's current encoding scheme.
 
+**Proportional cost replaces `turns.cost_usd` in queries.** Since `costUSD` in JSONL is always 0, per-turn cost is estimated as `session.total_cost_usd * (turn_all_tokens / session_all_tokens)` where all_tokens includes input, output, cache_read, and cache_creation. This is defined as `PROPORTIONAL_COST_SQL` in `repo.ts` and used in `getStatsByTask`, `getStatsByTasks`, `getTaggedTurns`, and `getTurnBlock`. Coverage is ~95% — turns with no JSONL token data get $0.
+
+**Dashboard auto-detects data source.** When `ZOZUL_API_URL` and `ZOZUL_API_KEY` are set, `html.ts` injects `ZOZUL_CONFIG` into the dashboard. On load, the dashboard health-checks the remote API (3s timeout). If available, it routes `fetchJson` calls to the remote; if any remote call fails, it falls back to local for that request. A badge in the header shows "Remote" or "Local".
+
 ---
 
 ## Session lifecycle
@@ -231,11 +235,18 @@ All served by `hooks/server.ts` on port 7890.
 | Method | Path | Description |
 |---|---|---|
 | GET | `/health` | Health check — returns `{ status: "ok" }` |
-| GET | `/dashboard` | Dashboard HTML |
+| GET | `/dashboard` | Dashboard HTML (injects `ZOZUL_CONFIG` when `ZOZUL_API_URL` / `ZOZUL_API_KEY` are set) |
 | GET | `/api/stats` | Aggregate stats — sessions, tokens, cost, user prompts, interruptions |
 | GET | `/api/sessions` | Paginated session list — returns `{ sessions, total, limit, offset }` |
 | GET | `/api/sessions/:id` | Single session row |
 | GET | `/api/sessions/:id/turns` | Turns for a session |
+| GET | `/api/context` | Active task context |
+| GET | `/api/tasks` | List distinct tags with turn counts, first/last tagged timestamps |
+| GET | `/api/tasks/stats` | Multi-tag cost/token stats — `?tags=X,Y&mode=all\|any&from=ISO&to=ISO` |
+| GET | `/api/tasks/turns` | Paginated turns filtered by tags — `?tags=X&mode=any&limit=N&offset=N` |
+| GET | `/api/tasks/:name/stats` | Per-tag cost/token breakdown |
+| GET | `/api/tasks/:name/turns` | Paginated turns for a single tag |
+| GET | `/api/turns/:id/block` | Turn block — all turns from a user prompt to the next user prompt |
 | GET | `/api/metrics/tokens` | Token time-series from `otel_metrics` |
 | GET | `/api/metrics/cost` | Cost time-series from `otel_metrics` |
 | GET | `/api/metrics/tools` | Tool usage breakdown from `tool_uses` |
@@ -247,6 +258,8 @@ All served by `hooks/server.ts` on port 7890.
 `/api/sessions` accepts `?limit=N` (default 50, max 500) and `?offset=N`. The response envelope `{ sessions, total, limit, offset }` lets the dashboard implement Load More without a separate count query.
 
 Time-series endpoints accept `?range=7d`, `?range=24h`, or `?from=ISO&to=ISO&step=5m`. Step auto-selects based on range if omitted.
+
+Task stats endpoints use proportional cost: `session_cost * turn_tokens / session_total_tokens` (including cache tokens) instead of `turns.cost_usd` which is always 0 from JSONL.
 
 ---
 
