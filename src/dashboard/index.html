@@ -590,6 +590,7 @@
 let dataSource = 'local';
 let autoRefreshTimer = null;
 let currentView = 'summary';
+let currentTimeWindow = '7d';
 let previousView = 'tasks';
 let allTaskGroups = [];
 let allTagStats = [];
@@ -844,7 +845,7 @@ async function loadSummary() {
     const [stats, tasks, costSeries, sessionsResp] = await Promise.all([
       fetchJson('/api/stats'),
       fetchJson('/api/tasks'),
-      fetchJson('/api/metrics/cost?range=30d'),
+      fetchJson('/api/metrics/cost?range=' + (currentTimeWindow === 'all' ? '90d' : currentTimeWindow) + '&step=1d'),
       fetchJson('/api/sessions?limit=500&offset=0'),
     ]);
     renderSummaryStats({
