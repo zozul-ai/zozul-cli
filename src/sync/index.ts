@@ -61,6 +61,30 @@ function buildSessionPayload(
   };
 }
 
+/**
+ * Sync a single session by ID — used for immediate post-Stop/SessionEnd sync.
+ * Silently no-ops if the session doesn't exist.
+ */
+export async function syncSingleSession(
+  repo: SessionRepo,
+  client: ZozulApiClient,
+  sessionId: string,
+  opts: SyncOptions = {},
+): Promise<void> {
+  const sessions = repo.getSessionsByIds([sessionId]);
+  if (sessions.length === 0) return;
+
+  const payload = buildSessionPayload(repo, sessions[0]);
+  if (opts.dryRun) return;
+
+  try {
+    await client.syncSession(sessionId, payload);
+    if (opts.verbose) console.log(`  auto-sync ${sessionId}: ok`);
+  } catch (err) {
+    if (opts.verbose) console.error(`  auto-sync ${sessionId}: failed — ${err instanceof Error ? err.message : err}`);
+  }
+}
+
 export async function runSync(
   repo: SessionRepo,
   client: ZozulApiClient,

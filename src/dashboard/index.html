@@ -734,6 +734,18 @@ function fmtAbsolute(s) {
   if (!s) return '';
   try { return new Date(s).toLocaleString(); } catch { return s; }
 }
+// SQLite datetime() returns "YYYY-MM-DD HH:MM:SS" with no timezone — append Z to parse as UTC
+function sqliteUtcToLocal(s) {
+  return new Date(s.replace(' ', 'T') + 'Z');
+}
+function fmtChartTs(s, span) {
+  const d = sqliteUtcToLocal(s);
+  if (span && span <= 24 * 3600000) {
+    return d.toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' });
+  }
+  return d.toLocaleDateString(undefined, { month: 'short', day: 'numeric' }) + ' ' +
+         d.toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' });
+}
 function shortId(s) { return s ? s.slice(0, 8) : '\u2014'; }
 function basename(p) {
   if (!p) return '\u2014';

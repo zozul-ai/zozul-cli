@@ -46,7 +46,12 @@ export function buildCli(): Command {
       const verbose = opts.verbose || envVerbose();
       const db = getDb(envDbPath());
       const repo = new SessionRepo(db);
-      const server = createHookServer({ port, repo, verbose });
+
+      const apiUrl = process.env.ZOZUL_API_URL;
+      const apiKey = process.env.ZOZUL_API_KEY;
+      const syncClient = apiUrl && apiKey ? new ZozulApiClient({ apiUrl, apiKey }) : undefined;
+
+      const server = createHookServer({ port, repo, verbose, syncClient });
 
       server.on("error", (err: NodeJS.ErrnoException) => {
         if (err.code === "EADDRINUSE") {
@@ -67,6 +72,12 @@ export function buildCli(): Command {
         console.log("\nPress Ctrl+C to stop.\n");
 
         const stopWatcher = await watchSessionFiles({ repo, verbose, catchUp: true });
+
+        // Catch-up sync on start, then sync after every Stop/SessionEnd (wired in server)
+        if (syncClient) {
+          if (verbose) console.log("  Remote sync: enabled");
+          runSync(repo, syncClient, { verbose }).catch(() => {});
+        }
 
         process.on("SIGINT", () => {
           stopWatcher();
