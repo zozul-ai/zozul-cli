@@ -322,21 +322,21 @@ export class SessionRepo {
 
   // ── Task tags ──
 
-  tagTurn(turnId: number, task: string): void {
+  tagTurn(turnId: number, task: string, runId?: string): void {
     this.db.prepare(`
-      INSERT OR IGNORE INTO task_tags (turn_id, task, tagged_at)
-      VALUES (?, ?, ?)
-    `).run(turnId, task, new Date().toISOString());
+      INSERT OR IGNORE INTO task_tags (turn_id, task, tagged_at, run_id)
+      VALUES (?, ?, ?, ?)
+    `).run(turnId, task, new Date().toISOString(), runId ?? null);
   }
 
-  tagTurnsBatch(turnIds: number[], task: string): void {
+  tagTurnsBatch(turnIds: number[], task: string, runId?: string): void {
     const stmt = this.db.prepare(`
-      INSERT OR IGNORE INTO task_tags (turn_id, task, tagged_at)
-      VALUES (?, ?, ?)
+      INSERT OR IGNORE INTO task_tags (turn_id, task, tagged_at, run_id)
+      VALUES (?, ?, ?, ?)
     `);
     const taggedAt = new Date().toISOString();
     this.db.transaction(() => {
-      for (const turnId of turnIds) stmt.run(turnId, task, taggedAt);
+      for (const turnId of turnIds) stmt.run(turnId, task, taggedAt, runId ?? null);
     })();
   }
 
@@ -519,6 +519,25 @@ export class SessionRepo {
       GROUP BY task
       ORDER BY last_tagged DESC
     `).all() as { task: string; turn_count: number; first_tagged: string; last_tagged: string }[];
+  }
+
+  listTagRuns(): { run_id: string; tag_count: number; turn_count: number; created_at: string; tasks: string }[] {
+    return this.db.prepare(`
+      SELECT run_id,
+        COUNT(*) as tag_count,
+        COUNT(DISTINCT turn_id) as turn_count,
+        MIN(tagged_at) as created_at,
+        GROUP_CONCAT(DISTINCT task) as tasks
+      FROM task_tags
+      WHERE run_id IS NOT NULL
+      GROUP BY run_id
+      ORDER BY created_at DESC
+    `).all() as { run_id: string; tag_count: number; turn_count: number; created_at: string; tasks: string }[];
+  }
+
+  rollbackTagRun(runId: string): number {
+    const result = this.db.prepare(`DELETE FROM task_tags WHERE run_id = ?`).run(runId);
+    return result.changes;
   }
 
   // ── Sync watermarks ──

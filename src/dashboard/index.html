@@ -456,9 +456,18 @@
       <div class="chart-card full-width"><h3 id="tokens-label">Tokens &amp; Cost (7d)</h3><canvas id="chart-tokens"></canvas></div>
     </div>
     <div class="panel" id="tasks-panel" style="display:none">
+      <div id="tag-runs-panel" style="display:none;padding:12px 16px;border-bottom:1px solid var(--border);font-size:12px">
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
+          <strong>Classify Runs</strong>
+          <span style="color:var(--text-dim);font-size:11px">Delete a run to roll back its tags</span>
+        </div>
+        <div id="tag-runs-list"></div>
+      </div>
       <div class="panel-header">
         <span>Tasks <span id="active-context" style="font-weight:400;font-size:11px;font-family:var(--mono)"></span></span>
         <div style="display:flex;gap:8px;align-items:center">
+          <button class="range-btn" onclick="retagSessions(this)" title="Re-run block tagger on all sessions">Retag</button>
+          <button class="range-btn" onclick="toggleTagRuns()" title="View and roll back classify runs">Runs</button>
           <input class="panel-filter" id="task-search" placeholder="search tags…" oninput="filterTagChips(this.value)" style="width:140px">
           <select class="panel-filter" id="task-time-range" onchange="onTaskTimeRange()" style="width:100px">
             <option value="">All time</option>
@@ -716,12 +725,28 @@ function updateLoadMore() {
 }
 
 const AUTO_REFRESH_INTERVAL = 10_000; // ms
+const TAGS_POLL_INTERVAL = 4_000; // ms — faster poll just for tags
+
+let tagsPollTimer = null;
 
 function scheduleAutoRefresh() {
   autoRefreshTimer = setTimeout(async () => {
     await loadDashboard();
     scheduleAutoRefresh();
   }, AUTO_REFRESH_INTERVAL);
+}
+
+function scheduleTagsPoll() {
+  tagsPollTimer = setTimeout(async () => {
+    try {
+      const [tasks, activeCtx] = await Promise.all([
+        fetchJson('/api/tasks'),
+        fetchJson('/api/context'),
+      ]);
+      await renderTasks(tasks, activeCtx);
+    } catch { /* ignore */ }
+    scheduleTagsPoll();
+  }, TAGS_POLL_INTERVAL);
 }
 
 // ── Stats ──
@@ -1300,7 +1325,49 @@ async function loadCharts() {
   renderTokenCostChart(tokens, cost);
 }
 
-loadDashboard().then(scheduleAutoRefresh);
+loadDashboard().then(() => { scheduleAutoRefresh(); scheduleTagsPoll(); });
+
+// ── Tag runs + retag ──
+
+async function retagSessions(btn) {
+  if (btn) { btn.textContent = 'Retagging…'; btn.disabled = true; }
+  try {
+    await fetch('/api/retag', { method: 'POST', headers: {'Content-Type':'application/json'}, body: '{}' });
+  } finally {
+    if (btn) { setTimeout(() => { btn.textContent = 'Retag'; btn.disabled = false; }, 2000); }
+  }
+}
+
+async function toggleTagRuns() {
+  const panel = document.getElementById('tag-runs-panel');
+  if (panel.style.display !== 'none') { panel.style.display = 'none'; return; }
+  panel.style.display = '';
+  const runs = await fetchJson('/api/tag-runs');
+  const list = document.getElementById('tag-runs-list');
+  if (!runs.length) { list.innerHTML = '<span style="color:var(--text-dim)">No runs recorded yet.</span>'; return; }
+  list.innerHTML = runs.map(r => {
+    const taskChips = (r.tasks || '').split(',').filter(Boolean).map(t =>
+      `<span style="background:rgba(124,110,240,0.1);color:var(--accent-light);padding:0 5px;border-radius:3px;font-size:10px;font-family:var(--mono)">${escHtml(t.trim())}</span>`
+    ).join(' ');
+    return `<div style="padding:6px 0;border-bottom:1px solid var(--border)">
+      <div style="display:flex;align-items:center;gap:12px">
+        <span style="font-family:var(--mono);font-size:11px;color:var(--text-dim)">${escHtml(r.run_id.slice(0,8))}</span>
+        <span style="font-size:12px;color:var(--text-dim)">${r.turn_count} turns · ${fmtDate(r.created_at)}</span>
+        <button class="range-btn" style="margin-left:auto;color:var(--red);border-color:var(--red)"
+          onclick="rollbackRun('${escHtml(r.run_id)}', this)">Roll back</button>
+      </div>
+      <div style="margin-top:4px;display:flex;flex-wrap:wrap;gap:3px">${taskChips}</div>
+    </div>`;
+  }).join('');
+}
+
+async function rollbackRun(runId, btn) {
+  if (!confirm('Delete all tags from this run?')) return;
+  btn.textContent = '…'; btn.disabled = true;
+  const result = await fetch('/api/tag-runs/' + encodeURIComponent(runId), { method: 'DELETE' });
+  const data = await result.json();
+  btn.closest('div').innerHTML = `<span style="color:var(--text-dim);font-size:12px">Rolled back — ${data.deleted} tags deleted</span>`;
+}
 
 // ── Work Log ──
 

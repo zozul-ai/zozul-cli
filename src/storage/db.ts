@@ -192,6 +192,11 @@ function migrate(db: Database.Database): void {
     db.exec(`ALTER TABLE turns ADD COLUMN is_real_user INTEGER DEFAULT 0`);
   }
 
+  const tagCols = (db.pragma("table_info(task_tags)") as { name: string }[]).map(r => r.name);
+  if (!tagCols.includes("run_id")) {
+    db.exec(`ALTER TABLE task_tags ADD COLUMN run_id TEXT`);
+  }
+
   const segCols = (db.pragma("table_info(work_segments)") as { name: string }[]).map(r => r.name);
   const newSegCols: [string, string][] = [
     ["narrative", "TEXT"],
@@ -285,6 +290,7 @@ export type TaskTagRow = {
   turn_id: number;
   task: string;
   tagged_at: string;
+  run_id: string | null;
 };
 
 export type BlockClassificationRow = {

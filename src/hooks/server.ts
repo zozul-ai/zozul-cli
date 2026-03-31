@@ -74,6 +74,33 @@ export function createHookServer(opts: HookServerOptions): http.Server {
         return;
       }
 
+      if ((method === "DELETE" || method === "POST") && url.startsWith("/api/")) {
+        const path = url.replace(/\?.*$/, "");
+
+        // DELETE /api/tag-runs/:runId
+        const runRollbackMatch = path.match(/^\/api\/tag-runs\/([^/]+)$/);
+        if (method === "DELETE" && runRollbackMatch) {
+          const runId = decodeURIComponent(runRollbackMatch[1]);
+          const deleted = repo.rollbackTagRun(runId);
+          if (verbose) log(`rolled back tag run ${runId}: ${deleted} tags deleted`);
+          sendJson(res, 200, { ok: true, deleted });
+          return;
+        }
+
+        // POST /api/retag — re-run tag-blocks for a session
+        if (method === "POST" && path === "/api/retag") {
+          const body = await readBody(req);
+          let sessionId: string | undefined;
+          try { sessionId = (JSON.parse(body) as { session_id?: string }).session_id; } catch { /* ignore */ }
+          tagBlocks(repo, { sessionId, verbose }).catch(() => {});
+          sendJson(res, 202, { ok: true });
+          return;
+        }
+
+        sendJson(res, 404, { error: "Not found" });
+        return;
+      }
+
       sendJson(res, 404, { error: "Not found" });
     } catch (err) {
       if (verbose) process.stderr.write(`  error: ${err}\n`);
@@ -145,10 +172,18 @@ async function handleHookEvent(
       }
     }
 
-    // On Stop: sync + tag the latest block in real-time
+    // On Stop: ingest latest transcript, then tag + sync
     if (eventName === "Stop" && payload.session_id) {
-      if (syncClient) syncSingleSession(repo, syncClient, payload.session_id, { verbose }).catch(() => {});
-      tagLatestBlock(repo, payload.session_id, undefined, verbose).catch(() => {});
+      (async () => {
+        if (payload.transcript_path) {
+          const projectPath = decodeProjectPathFromTranscript(payload.transcript_path);
+          try {
+            await ingestSessionFile(repo, payload.transcript_path, projectPath ?? undefined);
+          } catch { /* best-effort */ }
+        }
+        await tagLatestBlock(repo, payload.session_id, undefined, verbose).catch(() => {});
+        if (syncClient) syncSingleSession(repo, syncClient, payload.session_id, { verbose }).catch(() => {});
+      })().catch(() => {});
     }
 
     // Auto-clear context when Claude runs git commit or git push
@@ -304,6 +339,11 @@ function handleApiRoute(url: string, repo: SessionRepo, res: http.ServerResponse
     const taskName = decodeURIComponent(taskStatsMatch[1]);
     const stats = repo.getStatsByTask(taskName);
     sendJson(res, 200, stats ?? {});
+    return;
+  }
+
+  if (path === "/api/tag-runs") {
+    sendJson(res, 200, repo.listTagRuns());
     return;
   }
 

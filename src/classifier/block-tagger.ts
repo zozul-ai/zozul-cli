@@ -1,4 +1,5 @@
 import { spawnSync } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import type { SessionRepo } from "../storage/repo.js";
 import type { TurnRow } from "../storage/db.js";
 
@@ -129,7 +130,7 @@ async function tagSession(
 
   if (verbose) process.stderr.write(`[tag-blocks] session ${sessionId.slice(0, 8)}: ${userTurns.length} user turns\n`);
 
-  // Process in chunks of 50 to keep prompts manageable
+  const runId = randomUUID();
   const CHUNK_SIZE = 50;
   let totalSegments = 0;
   let totalTurns = 0;
@@ -171,7 +172,7 @@ async function tagSession(
 
       const ids = Array.from(allTurnIds);
       for (const tag of seg.tags) {
-        repo.tagTurnsBatch(ids, tag);
+        repo.tagTurnsBatch(ids, tag, runId);
       }
       totalTurns += ids.length;
       totalSegments++;
@@ -268,10 +269,11 @@ export async function tagLatestBlock(
 
   if (tags.length === 0) return;
 
+  const runId = randomUUID();
   const blockTurns = repo.getBlockTurns(targetTurn.id);
   const ids = blockTurns.map(t => t.id);
   for (const tag of tags) {
-    repo.tagTurnsBatch(ids, tag);
+    repo.tagTurnsBatch(ids, tag, runId);
   }
 
   if (verbose) process.stderr.write(`[tag-latest] session ${sessionId.slice(0, 8)}: [${tags.join(", ")}] — ${(targetTurn.content_text ?? "").slice(0, 60)}\n`);
