@@ -1195,14 +1195,14 @@ function renderTagDetailTurns(turns) {
 async function tagDetailNext() {
   tagDetailOffset += PAGE_SIZE;
   const tagQs = 'tags=' + encodeURIComponent(tagDetailName) + '&mode=any';
-  const turns = await fetchJson('/api/tasks/turns?' + tagQs + '&limit=' + PAGE_SIZE + '&offset=' + tagDetailOffset));
+  const turns = await fetchJson('/api/tasks/turns?' + tagQs + '&limit=' + PAGE_SIZE + '&offset=' + tagDetailOffset);
   renderTagDetailTurns(turns);
 }
 
 async function tagDetailPrev() {
   tagDetailOffset = Math.max(0, tagDetailOffset - PAGE_SIZE);
   const tagQs = 'tags=' + encodeURIComponent(tagDetailName) + '&mode=any';
-  const turns = await fetchJson('/api/tasks/turns?' + tagQs + '&limit=' + PAGE_SIZE + '&offset=' + tagDetailOffset));
+  const turns = await fetchJson('/api/tasks/turns?' + tagQs + '&limit=' + PAGE_SIZE + '&offset=' + tagDetailOffset);
   renderTagDetailTurns(turns);
 }
 
