@@ -230,6 +230,7 @@ All served by `hooks/server.ts` on port 7890.
 
 | Method | Path | Description |
 |---|---|---|
+| GET | `/health` | Health check — returns `{ status: "ok" }` |
 | GET | `/dashboard` | Dashboard HTML |
 | GET | `/api/stats` | Aggregate stats — sessions, tokens, cost, user prompts, interruptions |
 | GET | `/api/sessions` | Paginated session list — returns `{ sessions, total, limit, offset }` |

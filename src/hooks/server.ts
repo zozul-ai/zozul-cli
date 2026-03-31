@@ -52,6 +52,12 @@ export function createHookServer(opts: HookServerOptions): http.Server {
         return;
       }
 
+      // ── Health check ──
+      if (method === "GET" && url === "/health") {
+        sendJson(res, 200, { status: "ok" });
+        return;
+      }
+
       // ── Dashboard ──
       if (method === "GET" && (url === "/dashboard" || url === "/")) {
         const apiUrl = process.env.ZOZUL_API_URL;
