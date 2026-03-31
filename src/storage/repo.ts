@@ -542,6 +542,31 @@ export class SessionRepo {
     return result.changes;
   }
 
+  deleteTag(tag: string): number {
+    const result = this.db.prepare(`DELETE FROM task_tags WHERE task = ?`).run(tag);
+    return result.changes;
+  }
+
+  deleteTagsForScope(projectPath?: string, sessionId?: string): number {
+    if (sessionId) {
+      const result = this.db.prepare(`
+        DELETE FROM task_tags WHERE turn_id IN (SELECT id FROM turns WHERE session_id = ?)
+      `).run(sessionId);
+      return result.changes;
+    }
+    if (projectPath) {
+      const alt = projectPath.replace(/\//g, "-").replace(/-/g, "/");
+      const result = this.db.prepare(`
+        DELETE FROM task_tags WHERE turn_id IN (
+          SELECT t.id FROM turns t JOIN sessions s ON s.id = t.session_id
+          WHERE s.project_path IN (?, ?)
+        )
+      `).run(projectPath, alt);
+      return result.changes;
+    }
+    return 0;
+  }
+
   // ── Sync watermarks ──
 
   getSyncWatermark(tableName: string): number {

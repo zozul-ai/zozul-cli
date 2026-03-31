@@ -10,6 +10,8 @@ export interface TagBlocksOptions {
   sessionId?: string;
   model?: string;
   verbose?: boolean;
+  customTags?: string[];   // user-added tags to include in vocabulary
+  freeRetag?: boolean;     // if true, skip existing vocabulary (fresh reclassification)
 }
 
 export interface TagBlocksResult {
@@ -289,13 +291,16 @@ export async function tagBlocks(
 ): Promise<TagBlocksResult> {
   const model = opts.model ?? "claude-haiku-4-5-20251001";
 
-  // Get existing tag vocabulary to encourage reuse
-  const existingTags = repo.listTasks().map(t => t.task);
+  // Build vocabulary: existing tags (unless free retag) + custom tags
+  const existingTags = opts.freeRetag
+    ? []
+    : repo.listTasks().map(t => t.task);
+  const vocab = [...new Set([...existingTags, ...(opts.customTags ?? [])])];
 
   const result: TagBlocksResult = { sessions: 0, segments: 0, turns: 0, costUsd: 0 };
 
   if (opts.sessionId) {
-    const r = await tagSession(repo, opts.sessionId, existingTags, model, opts.verbose);
+    const r = await tagSession(repo, opts.sessionId, vocab, model, opts.verbose);
     result.sessions = 1;
     result.segments += r.segments;
     result.turns += r.turns;
@@ -311,7 +316,7 @@ export async function tagBlocks(
   if (opts.verbose) process.stderr.write(`[tag-blocks] found ${sessions.length} sessions\n`);
 
   for (const session of sessions) {
-    const r = await tagSession(repo, session.id, existingTags, model, opts.verbose);
+    const r = await tagSession(repo, session.id, vocab, model, opts.verbose);
     if (r.segments > 0) {
       result.sessions++;
       result.segments += r.segments;

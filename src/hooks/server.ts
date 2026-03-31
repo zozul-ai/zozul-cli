@@ -92,17 +92,42 @@ export function createHookServer(opts: HookServerOptions): http.Server {
           const body = await readBody(req);
           let sessionId: string | undefined;
           let projectPath: string | undefined;
+          let customTags: string[] = [];
+          let deletedTags: string[] = [];
+          let freeRetag = false;
           try {
-            const parsed = JSON.parse(body) as { session_id?: string; project_path?: string };
+            const parsed = JSON.parse(body) as {
+              session_id?: string;
+              project_path?: string;
+              custom_tags?: string[];
+              deleted_tags?: string[];
+              free_retag?: boolean;
+            };
             sessionId = parsed.session_id;
             projectPath = parsed.project_path;
+            customTags = parsed.custom_tags ?? [];
+            deletedTags = parsed.deleted_tags ?? [];
+            freeRetag = parsed.free_retag ?? false;
           } catch { /* ignore */ }
-          // Must provide either session_id or project_path — refuse to retag everything
+
           if (!sessionId && !projectPath) {
             sendJson(res, 400, { error: "Provide session_id or project_path" });
             return;
           }
-          tagBlocks(repo, { sessionId, projectPath, verbose }).catch(() => {});
+
+          // Free retag: wipe all tags for the project first
+          if (freeRetag && (projectPath || sessionId)) {
+            repo.deleteTagsForScope(projectPath, sessionId);
+            if (verbose) log(`free retag: cleared all tags for ${projectPath ?? sessionId}`);
+          }
+
+          // Apply staged deletions
+          for (const tag of deletedTags) {
+            repo.deleteTag(tag);
+          }
+          if (deletedTags.length > 0 && verbose) log(`deleted tags: ${deletedTags.join(", ")}`);
+
+          tagBlocks(repo, { sessionId, projectPath, customTags, freeRetag, verbose }).catch(() => {});
           sendJson(res, 202, { ok: true });
           return;
         }

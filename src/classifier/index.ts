@@ -1,5 +1,4 @@
 import { execSync, spawnSync } from "node:child_process";
-import { randomUUID } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import os from "node:os";
@@ -421,14 +420,7 @@ export async function classifyCommit(
   const learnings  = toStrArray(parsed.learnings);
   const tags       = toStrArray(parsed.tags);
 
-  // 5. Write tags to task_tags so they appear in the Tasks panel
-  const runId = randomUUID();
-  const turnIds = turns.map(t => t.id);
-  for (const tag of tags) {
-    repo.tagTurnsBatch(turnIds, tag, runId);
-  }
-
-  // 6. Store work segment
+  // 5. Store work segment
   repo.insertWorkSegment({
     commit_sha: commit.sha,
     commit_message: commit.message,

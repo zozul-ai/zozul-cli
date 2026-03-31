@@ -466,7 +466,8 @@
       <div class="panel-header">
         <span>Tasks <span id="active-context" style="font-weight:400;font-size:11px;font-family:var(--mono)"></span></span>
         <div style="display:flex;gap:8px;align-items:center">
-          <button class="range-btn" onclick="retagSessions(this)" title="Re-run block tagger on all sessions">Retag</button>
+          <button class="range-btn" onclick="retagSessions(this)" id="retag-btn" title="Retag using current + custom tags, apply deletions">Retag</button>
+          <button class="range-btn" onclick="freeRetagSessions(this)" id="free-retag-btn" title="Full reclassification — ignores existing vocabulary">Free retag</button>
           <button class="range-btn" onclick="toggleTagRuns()" title="View and roll back classify runs">Runs</button>
           <input class="panel-filter" id="task-search" placeholder="search tags…" oninput="filterTagChips(this.value)" style="width:140px">
           <select class="panel-filter" id="task-time-range" onchange="onTaskTimeRange()" style="width:100px">
@@ -479,7 +480,11 @@
           </select>
         </div>
       </div>
-      <div style="padding:12px 16px;display:flex;gap:6px;flex-wrap:wrap;border-bottom:1px solid var(--border)" id="task-chips"></div>
+      <div style="padding:10px 16px;border-bottom:1px solid var(--border);display:flex;flex-wrap:wrap;gap:6px;align-items:center" id="tag-input-row">
+        <div id="task-chips" style="display:contents"></div>
+        <input id="tag-input" class="panel-filter" placeholder="add tags…" style="width:120px;flex-shrink:0"
+          onkeydown="onTagInputKey(event)" oninput="onTagInputChange(event)">
+      </div>
       <div id="task-stats-grid" class="stats-grid" style="padding:16px;margin-bottom:0"></div>
       <div id="turns-section" style="display:none">
         <div class="panel-header">
@@ -777,6 +782,59 @@ let selectedTags = new Set();
 let taskTurnsOffset = 0;
 const TURNS_PAGE = 10;
 
+// Staged tag edits — persisted to localStorage
+const STAGED_KEY = 'zozul_tag_staged';
+function loadStaged() {
+  try { return JSON.parse(localStorage.getItem(STAGED_KEY) || '{"custom":[],"deleted":[]}'); } catch { return {custom:[],deleted:[]}; }
+}
+function saveStaged(s) { localStorage.setItem(STAGED_KEY, JSON.stringify(s)); }
+function getStagedCustom() { return new Set(loadStaged().custom); }
+function getStagedDeleted() { return new Set(loadStaged().deleted); }
+
+function addCustomTag(tag) {
+  tag = tag.trim().toLowerCase().replace(/\s+/g, '-');
+  if (!tag) return;
+  const s = loadStaged();
+  if (!s.custom.includes(tag)) s.custom.push(tag);
+  s.deleted = s.deleted.filter(t => t !== tag); // un-delete if re-adding
+  saveStaged(s);
+  renderTagChips('');
+}
+
+function markTagDeleted(tag) {
+  const s = loadStaged();
+  if (!s.deleted.includes(tag)) s.deleted.push(tag);
+  s.custom = s.custom.filter(t => t !== tag);
+  saveStaged(s);
+  renderTagChips('');
+}
+
+function unmarkTagDeleted(tag) {
+  const s = loadStaged();
+  s.deleted = s.deleted.filter(t => t !== tag);
+  saveStaged(s);
+  renderTagChips('');
+}
+
+function onTagInputKey(e) {
+  if (e.key === ',' || e.key === 'Enter') {
+    e.preventDefault();
+    const val = e.target.value.replace(/,$/, '').trim();
+    if (val) addCustomTag(val);
+    e.target.value = '';
+  }
+}
+
+function onTagInputChange(e) {
+  // Allow comma anywhere in input to trigger chip creation
+  if (e.target.value.includes(',')) {
+    const parts = e.target.value.split(',');
+    const last = parts.pop();
+    parts.forEach(p => { if (p.trim()) addCustomTag(p); });
+    e.target.value = last;
+  }
+}
+
 function getTaskTimeRange() {
   const val = document.getElementById('task-time-range').value;
   if (!val) return {};
@@ -812,12 +870,38 @@ async function renderTasks(tasks, activeCtx) {
 function renderTagChips(search) {
   const chipsEl = document.getElementById('task-chips');
   const q = search.toLowerCase();
+  const deletedSet = getStagedDeleted();
+  const customSet = getStagedCustom();
+
+  // Existing tags from DB
   const filtered = q ? allTasks.filter(t => t.task.toLowerCase().includes(q)) : allTasks;
-  chipsEl.innerHTML = filtered.map(t => {
+  const existingHtml = filtered.map(t => {
+    const isDeleted = deletedSet.has(t.task);
     const sel = selectedTags.has(t.task) ? ' selected' : '';
-    return '<label class="tag-chip' + sel + '" data-tag="' + escHtml(t.task) + '" onclick="toggleTag(this)">' +
-      escHtml(t.task) + ' <span style="color:var(--text-dim);font-size:10px">(' + t.turn_count + ')</span></label>';
+    const style = isDeleted ? 'text-decoration:line-through;opacity:0.5' : '';
+    const xBtn = isDeleted
+      ? `<span onclick="event.stopPropagation();unmarkTagDeleted('${escHtml(t.task)}')" title="Undo delete" style="cursor:pointer;color:var(--green);margin-left:3px">↩</span>`
+      : `<span onclick="event.stopPropagation();markTagDeleted('${escHtml(t.task)}')" title="Mark for deletion" style="cursor:pointer;color:var(--text-dim);margin-left:3px">×</span>`;
+    return `<label class="tag-chip${sel}" data-tag="${escHtml(t.task)}" onclick="toggleTag(this)" style="${style}">` +
+      escHtml(t.task) + ` <span style="color:var(--text-dim);font-size:10px">(${t.turn_count})</span>${xBtn}</label>`;
   }).join('');
+
+  // Custom staged tags (not yet in DB)
+  const customFiltered = [...customSet].filter(t => !q || t.includes(q));
+  const customHtml = customFiltered.map(t =>
+    `<label class="tag-chip" style="border-style:dashed;color:var(--accent-light)" data-tag="${escHtml(t)}" onclick="toggleTag(this)">` +
+    escHtml(t) + ` <span style="font-size:10px;color:var(--text-dim)">(0)</span>` +
+    `<span onclick="event.stopPropagation();removeCustomTag('${escHtml(t)}')" style="cursor:pointer;color:var(--text-dim);margin-left:3px">×</span></label>`
+  ).join('');
+
+  chipsEl.innerHTML = existingHtml + customHtml;
+}
+
+function removeCustomTag(tag) {
+  const s = loadStaged();
+  s.custom = s.custom.filter(t => t !== tag);
+  saveStaged(s);
+  renderTagChips('');
 }
 
 function filterTagChips(q) { renderTagChips(q); }
@@ -1331,16 +1415,35 @@ loadDashboard().then(() => { scheduleAutoRefresh(); scheduleTagsPoll(); });
 // ── Tag runs + retag ──
 
 async function retagSessions(btn) {
-  const sessionId = btn && btn.dataset.sessionId;
-  if (!sessionId && !confirm('Re-tag all sessions for this project? This may take a minute.')) return;
+  if (!confirm('Retag all sessions? Staged deletions will be applied and custom tags added to vocabulary.')) return;
+  if (btn) { btn.textContent = 'Retagging…'; btn.disabled = true; }
+  const s = loadStaged();
+  try {
+    await fetch('/api/retag', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({
+      project_path: window._projectPath,
+      custom_tags: s.custom,
+      deleted_tags: s.deleted,
+    })});
+    saveStaged({custom: [], deleted: []}); // clear staged after apply
+    renderTagChips('');
+  } finally {
+    if (btn) { setTimeout(() => { btn.textContent = 'Retag'; btn.disabled = false; }, 2000); }
+  }
+}
+
+async function freeRetagSessions(btn) {
+  if (!confirm('Free retag: wipe all tags and reclassify from scratch. Cannot be undone without a run rollback.')) return;
   if (btn) { btn.textContent = 'Retagging…'; btn.disabled = true; }
   try {
-    const body = sessionId
-      ? { session_id: sessionId }
-      : { project_path: window._projectPath };
-    await fetch('/api/retag', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify(body) });
+    await fetch('/api/retag', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({
+      project_path: window._projectPath,
+      free_retag: true,
+      deleted_tags: [...getStagedDeleted()], // wipe these too
+    })});
+    saveStaged({custom: [], deleted: []});
+    renderTagChips('');
   } finally {
-    if (btn) { setTimeout(() => { btn.textContent = sessionId ? 'Retag' : 'Retag all'; btn.disabled = false; }, 2000); }
+    if (btn) { setTimeout(() => { btn.textContent = 'Free retag'; btn.disabled = false; }, 2000); }
   }
 }
 
