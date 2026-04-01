@@ -9,6 +9,7 @@ import {
 } from "./transform.js";
 
 const BATCH_SIZE = 500;
+let syncInProgress = false;
 
 export interface SyncCounts {
   synced: number;
@@ -90,6 +91,13 @@ export async function runSync(
   client: ZozulApiClient,
   opts: SyncOptions = {},
 ): Promise<SyncResult> {
+  if (syncInProgress) {
+    if (opts.verbose) console.log("  sync already in progress, skipping");
+    return { sessions: zeroCounts(), otel_metrics: zeroCounts(), otel_events: zeroCounts() };
+  }
+  syncInProgress = true;
+  try {
+
   const result: SyncResult = {
     sessions: zeroCounts(),
     otel_metrics: zeroCounts(),
@@ -182,6 +190,10 @@ export async function runSync(
   );
 
   return result;
+
+  } finally {
+    syncInProgress = false;
+  }
 }
 
 /**
