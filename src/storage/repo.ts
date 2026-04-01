@@ -39,8 +39,7 @@ export class SessionRepo {
         total_input_tokens          = MAX(total_input_tokens, @total_input_tokens),
         total_output_tokens         = MAX(total_output_tokens, @total_output_tokens),
         total_cache_read_tokens     = MAX(total_cache_read_tokens, @total_cache_read_tokens),
-        total_cache_creation_tokens = MAX(total_cache_creation_tokens, @total_cache_creation_tokens),
-        total_duration_ms           = MAX(total_duration_ms, @total_duration_ms)
+        total_cache_creation_tokens = MAX(total_cache_creation_tokens, @total_cache_creation_tokens)
     `).run({
       ...session,
       ended_at: session.ended_at ?? null,
@@ -582,14 +581,18 @@ export class SessionRepo {
         total_cache_creation_tokens = COALESCE((
           SELECT SUM(value) FROM otel_metrics
           WHERE name = 'claude_code.token.usage' AND json_extract(attributes, '$.type') = 'cacheCreation' AND session_id = sessions.id
-        ), total_cache_creation_tokens)
+        ), total_cache_creation_tokens),
+        total_duration_ms = COALESCE((
+          SELECT SUM(value) * 1000 FROM otel_metrics
+          WHERE name = 'claude_code.active_time.total' AND session_id = sessions.id
+        ), total_duration_ms)
       WHERE id IN (SELECT DISTINCT session_id FROM otel_metrics WHERE session_id IS NOT NULL)
     `).run();
 
-    // Zero out cost for sessions with no OTEL backing (unverifiable)
+    // Zero out cost/duration for sessions with no OTEL backing (unverifiable)
     this.db.prepare(`
-      UPDATE sessions SET total_cost_usd = 0
-      WHERE total_cost_usd > 0
+      UPDATE sessions SET total_cost_usd = 0, total_duration_ms = 0
+      WHERE (total_cost_usd > 0 OR total_duration_ms > 0)
         AND id NOT IN (SELECT DISTINCT session_id FROM otel_metrics WHERE session_id IS NOT NULL)
     `).run();
 
