@@ -93,6 +93,10 @@ function doServe(opts: ServeOpts): Promise<void> {
       reject(err);
     });
 
+    // Recompute session costs from raw OTEL data to fix any accumulation drift
+    const fixed = repo.recomputeSessionCostsFromOtel();
+    if (fixed > 0 && opts.verbose) console.log(`Recomputed costs for ${fixed} sessions from OTEL data`);
+
     server.listen(opts.port, async () => {
       console.log(`zozul listening on http://localhost:${opts.port}`);
       console.log(`  Dashboard:     http://localhost:${opts.port}/dashboard`);
@@ -306,6 +310,9 @@ export function buildCli(): Command {
       } else {
         console.log(`Syncing to ${apiUrl}...\n`);
       }
+
+      // Recompute costs from raw OTEL before syncing to ensure accuracy
+      repo.recomputeSessionCostsFromOtel();
 
       const result = await runSync(repo, client, {
         verbose: opts.verbose || envVerbose(),

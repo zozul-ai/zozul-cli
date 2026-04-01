@@ -34,12 +34,12 @@ export class SessionRepo {
         ended_at      = COALESCE(@ended_at, ended_at),
         total_turns   = @total_turns,
         model         = COALESCE(@model, model),
-        -- Use MAX so that OTEL-accumulated values are never clobbered by a JSONL re-ingest
+        -- Use MAX for tokens so OTEL values aren't clobbered by JSONL re-ingest.
+        -- Cost and duration are OTEL-only — never overwrite from JSONL.
         total_input_tokens          = MAX(total_input_tokens, @total_input_tokens),
         total_output_tokens         = MAX(total_output_tokens, @total_output_tokens),
         total_cache_read_tokens     = MAX(total_cache_read_tokens, @total_cache_read_tokens),
         total_cache_creation_tokens = MAX(total_cache_creation_tokens, @total_cache_creation_tokens),
-        total_cost_usd              = MAX(total_cost_usd, @total_cost_usd),
         total_duration_ms           = MAX(total_duration_ms, @total_duration_ms)
     `).run({
       ...session,
@@ -62,31 +62,44 @@ export class SessionRepo {
     latestTimestamp: string;
     model: string | null;
   }): void {
+    // Ensure session row exists (stub if needed)
     this.db.prepare(`
-      INSERT INTO sessions (id, started_at, ended_at, total_cost_usd, total_input_tokens,
-        total_output_tokens, total_cache_read_tokens, total_cache_creation_tokens,
-        total_duration_ms, model)
-      VALUES (@id, @ts, @ts, @cost, @input, @output, @cache_read, @cache_creation, @duration_ms, @model)
+      INSERT INTO sessions (id, started_at, ended_at, model)
+      VALUES (@id, @ts, @ts, @model)
       ON CONFLICT(id) DO UPDATE SET
-        total_cost_usd              = total_cost_usd + @cost,
-        total_input_tokens          = total_input_tokens + @input,
-        total_output_tokens         = total_output_tokens + @output,
-        total_cache_read_tokens     = total_cache_read_tokens + @cache_read,
-        total_cache_creation_tokens = total_cache_creation_tokens + @cache_creation,
-        total_duration_ms           = total_duration_ms + @duration_ms,
         ended_at = CASE WHEN @ts > COALESCE(ended_at, '') THEN @ts ELSE ended_at END,
         model    = COALESCE(@model, model)
-    `).run({
-      id:          sessionId,
-      ts:          deltas.latestTimestamp,
-      cost:        deltas.costDelta,
-      input:       deltas.inputDelta,
-      output:      deltas.outputDelta,
-      cache_read:  deltas.cacheReadDelta,
-      cache_creation: deltas.cacheCreationDelta,
-      duration_ms: deltas.durationMsDelta,
-      model:       deltas.model,
-    });
+    `).run({ id: sessionId, ts: deltas.latestTimestamp, model: deltas.model });
+
+    // Recompute totals from raw otel_metrics (authoritative, no drift)
+    this.db.prepare(`
+      UPDATE sessions SET
+        total_cost_usd = COALESCE((
+          SELECT SUM(value) FROM otel_metrics
+          WHERE name = 'claude_code.cost.usage' AND session_id = ?
+        ), 0),
+        total_input_tokens = COALESCE((
+          SELECT SUM(value) FROM otel_metrics
+          WHERE name = 'claude_code.token.usage' AND json_extract(attributes, '$.type') = 'input' AND session_id = ?
+        ), total_input_tokens),
+        total_output_tokens = COALESCE((
+          SELECT SUM(value) FROM otel_metrics
+          WHERE name = 'claude_code.token.usage' AND json_extract(attributes, '$.type') = 'output' AND session_id = ?
+        ), total_output_tokens),
+        total_cache_read_tokens = COALESCE((
+          SELECT SUM(value) FROM otel_metrics
+          WHERE name = 'claude_code.token.usage' AND json_extract(attributes, '$.type') = 'cacheRead' AND session_id = ?
+        ), total_cache_read_tokens),
+        total_cache_creation_tokens = COALESCE((
+          SELECT SUM(value) FROM otel_metrics
+          WHERE name = 'claude_code.token.usage' AND json_extract(attributes, '$.type') = 'cacheCreation' AND session_id = ?
+        ), total_cache_creation_tokens),
+        total_duration_ms = COALESCE((
+          SELECT SUM(value) * 1000 FROM otel_metrics
+          WHERE name = 'claude_code.active_time.total' AND session_id = ?
+        ), total_duration_ms)
+      WHERE id = ?
+    `).run(sessionId, sessionId, sessionId, sessionId, sessionId, sessionId, sessionId);
   }
 
   insertTurn(turn: Omit<TurnRow, "id">): number {
@@ -539,6 +552,48 @@ export class SessionRepo {
       GROUP BY task
       ORDER BY last_tagged DESC
     `).all() as { task: string; turn_count: number; first_tagged: string; last_tagged: string }[];
+  }
+
+  /**
+   * Recompute sessions.total_cost_usd (and token fields) from raw otel_metrics.
+   * Fixes drift caused by late-start catch-up batches or duplicate processing.
+   * Safe to call repeatedly — always produces correct values from append-only source data.
+   */
+  recomputeSessionCostsFromOtel(): number {
+    // Recompute from raw OTEL for sessions that have metrics
+    const updated = this.db.prepare(`
+      UPDATE sessions SET
+        total_cost_usd = COALESCE((
+          SELECT SUM(value) FROM otel_metrics
+          WHERE name = 'claude_code.cost.usage' AND session_id = sessions.id
+        ), 0),
+        total_input_tokens = COALESCE((
+          SELECT SUM(value) FROM otel_metrics
+          WHERE name = 'claude_code.token.usage' AND json_extract(attributes, '$.type') = 'input' AND session_id = sessions.id
+        ), total_input_tokens),
+        total_output_tokens = COALESCE((
+          SELECT SUM(value) FROM otel_metrics
+          WHERE name = 'claude_code.token.usage' AND json_extract(attributes, '$.type') = 'output' AND session_id = sessions.id
+        ), total_output_tokens),
+        total_cache_read_tokens = COALESCE((
+          SELECT SUM(value) FROM otel_metrics
+          WHERE name = 'claude_code.token.usage' AND json_extract(attributes, '$.type') = 'cacheRead' AND session_id = sessions.id
+        ), total_cache_read_tokens),
+        total_cache_creation_tokens = COALESCE((
+          SELECT SUM(value) FROM otel_metrics
+          WHERE name = 'claude_code.token.usage' AND json_extract(attributes, '$.type') = 'cacheCreation' AND session_id = sessions.id
+        ), total_cache_creation_tokens)
+      WHERE id IN (SELECT DISTINCT session_id FROM otel_metrics WHERE session_id IS NOT NULL)
+    `).run();
+
+    // Zero out cost for sessions with no OTEL backing (unverifiable)
+    this.db.prepare(`
+      UPDATE sessions SET total_cost_usd = 0
+      WHERE total_cost_usd > 0
+        AND id NOT IN (SELECT DISTINCT session_id FROM otel_metrics WHERE session_id IS NOT NULL)
+    `).run();
+
+    return updated.changes;
   }
 
   // ── Sync watermarks ──
