@@ -1043,64 +1043,10 @@ function renderSummaryStats(s) {
 
 async function loadTasks() {
   try {
-    const [stats, tasks] = await Promise.all([
-      fetchJson('/api/stats'),
-      fetchJson('/api/tasks'),
-    ]);
-    if (!tasks.length) { allTaskGroups = []; renderTaskTable([]); return; }
-
-    // Discover tag combinations by sampling one turn per tag
-    const samples = await Promise.all(
-      tasks.map(t => fetchJson('/api/tasks/turns?tags=' + encodeURIComponent(t.task) + '&mode=any&limit=1')
-        .then(turns => turns[0]?.tags || t.task)
-        .catch(() => t.task)
-      )
-    );
-    // Deduplicate: normalize each combo to sorted pipe-separated
-    const combos = [...new Set(samples.map(s => s.split(', ').sort().join('|')))];
-
-    // Fetch stats for each unique combo
-    const comboStats = await Promise.all(
-      combos.map(combo => {
-        const tags = combo.split('|');
-        const qs = 'tags=' + tags.map(encodeURIComponent).join(',') + '&mode=all';
-        return fetchJson('/api/tasks/stats?' + qs)
-          .then(s => ({ ...s, tags: combo }))
-          .catch(() => ({ tags: combo, total_turns: 0, user_turns: 0, total_duration_ms: 0, total_cost_usd: 0 }));
-      })
-    );
-
-    let taskGroups = comboStats.map(s => ({
-      tags: s.tags,
-      turn_count: s.total_turns ?? 0,
-      human_interventions: s.user_turns ?? 0,
-      total_duration_ms: s.total_duration_ms ?? 0,
-      total_cost_usd: s.total_cost_usd ?? 0,
-      last_seen: s.last_seen ?? null,
-    }));
-
-    // Add cost gap to the Untagged row so task costs sum to total
-    const attributedCost = taskGroups.reduce((s, g) => s + (g.total_cost_usd || 0), 0);
-    const totalCost = stats.total_cost_usd || 0;
-    const gap = totalCost - attributedCost;
-    if (gap > 0.01) {
-      const untagged = taskGroups.find(g => g.tags === 'Untagged');
-      if (untagged) {
-        untagged.total_cost_usd = (untagged.total_cost_usd || 0) + gap;
-      } else {
-        taskGroups.push({
-          tags: 'Untagged',
-          turn_count: 0,
-          human_interventions: 0,
-          total_duration_ms: 0,
-          total_cost_usd: gap,
-          last_seen: null,
-        });
-      }
-    }
-
-    allTaskGroups = taskGroups;
-    renderTaskTable(sortData(taskGroups, sortState.tasks));
+    const timeQs = timeQueryString();
+    const groups = await fetchJson('/api/task-groups' + (timeQs ? '?' + timeQs : ''));
+    allTaskGroups = groups;
+    renderTaskTable(sortData(groups, sortState.tasks));
   } catch (e) {
     console.error('tasks load failed', e);
   }
