@@ -174,13 +174,22 @@ export class SessionRepo {
     `).run(event);
   }
 
-  listSessions(limit = 50, offset = 0): SessionRow[] {
+  listSessions(limit = 50, offset = 0, from?: string, to?: string): SessionRow[] {
+    if (from && to) {
+      return this.db.prepare(`
+        SELECT * FROM sessions WHERE started_at >= ? AND started_at <= ? ORDER BY started_at DESC LIMIT ? OFFSET ?
+      `).all(from, to, limit, offset) as SessionRow[];
+    }
     return this.db.prepare(`
       SELECT * FROM sessions ORDER BY started_at DESC LIMIT ? OFFSET ?
     `).all(limit, offset) as SessionRow[];
   }
 
-  countSessions(): number {
+  countSessions(from?: string, to?: string): number {
+    if (from && to) {
+      const row = this.db.prepare(`SELECT COUNT(*) as n FROM sessions WHERE started_at >= ? AND started_at <= ?`).get(from, to) as { n: number };
+      return row.n;
+    }
     const row = this.db.prepare(`SELECT COUNT(*) as n FROM sessions`).get() as { n: number };
     return row.n;
   }
@@ -207,7 +216,23 @@ export class SessionRepo {
     `).all(sessionId);
   }
 
-  getAggregateStats() {
+  getAggregateStats(from?: string, to?: string) {
+    if (from && to) {
+      return this.db.prepare(`
+        WITH fs AS (SELECT * FROM sessions WHERE started_at >= ? AND started_at <= ?),
+             fh AS (SELECT * FROM hook_events WHERE timestamp >= ? AND timestamp <= ?)
+        SELECT
+          (SELECT COUNT(*)                       FROM fs) as total_sessions,
+          (SELECT SUM(total_input_tokens)        FROM fs) as total_input_tokens,
+          (SELECT SUM(total_output_tokens)       FROM fs) as total_output_tokens,
+          (SELECT SUM(total_cache_read_tokens)   FROM fs) as total_cache_read_tokens,
+          (SELECT SUM(total_cost_usd)            FROM fs) as total_cost_usd,
+          (SELECT SUM(total_turns)               FROM fs) as total_turns,
+          (SELECT SUM(total_duration_ms)         FROM fs) as total_duration_ms,
+          (SELECT COUNT(*) FROM fh WHERE event_name = 'UserPromptSubmit') as total_user_prompts,
+          (SELECT COUNT(*) FROM fh WHERE event_name = 'Stop') as total_interruptions
+      `).get(from, to, from, to);
+    }
     return this.db.prepare(`
       SELECT
         (SELECT COUNT(*) FROM sessions) as total_sessions,
@@ -415,17 +440,20 @@ export class SessionRepo {
 
   getTaggedTurns(opts: {
     tags?: string[];
+    untagged?: boolean;
     mode?: "all" | "any";
     from?: string;
     to?: string;
     limit?: number;
     offset?: number;
   } = {}): (TurnRow & { tags: string; block_input_tokens: number; block_output_tokens: number; block_cache_read_tokens: number; block_cache_creation_tokens: number })[] {
-    const { tags, mode = "any", from, to, limit = 50, offset = 0 } = opts;
+    const { tags, untagged = false, mode = "any", from, to, limit = 50, offset = 0 } = opts;
     const conditions: string[] = [];
     const params: unknown[] = [];
 
-    if (tags && tags.length > 0) {
+    if (untagged) {
+      conditions.push("t.id NOT IN (SELECT DISTINCT turn_id FROM task_tags)");
+    } else if (tags && tags.length > 0) {
       const placeholders = tags.map(() => "?").join(",");
       if (mode === "all" && tags.length > 1) {
         conditions.push(`t.id IN (
