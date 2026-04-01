@@ -34,12 +34,14 @@ export class SessionRepo {
         ended_at      = COALESCE(@ended_at, ended_at),
         total_turns   = @total_turns,
         model         = COALESCE(@model, model),
-        -- Use MAX for tokens so OTEL values aren't clobbered by JSONL re-ingest.
-        -- Cost and duration are OTEL-only — never overwrite from JSONL.
+        -- Use MAX so OTEL values aren't clobbered by JSONL re-ingest,
+        -- but JSONL values fill in as a floor for sessions without OTEL data.
         total_input_tokens          = MAX(total_input_tokens, @total_input_tokens),
         total_output_tokens         = MAX(total_output_tokens, @total_output_tokens),
         total_cache_read_tokens     = MAX(total_cache_read_tokens, @total_cache_read_tokens),
-        total_cache_creation_tokens = MAX(total_cache_creation_tokens, @total_cache_creation_tokens)
+        total_cache_creation_tokens = MAX(total_cache_creation_tokens, @total_cache_creation_tokens),
+        total_cost_usd              = MAX(total_cost_usd, @total_cost_usd),
+        total_duration_ms           = MAX(total_duration_ms, @total_duration_ms)
     `).run({
       ...session,
       ended_at: session.ended_at ?? null,
