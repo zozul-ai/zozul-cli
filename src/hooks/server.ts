@@ -183,7 +183,10 @@ function handleApiRoute(url: string, repo: SessionRepo, res: http.ServerResponse
   }
 
   if (path === "/api/stats") {
-    const stats = repo.getAggregateStats();
+    const qs = new URL(url, "http://x").searchParams;
+    const from = qs.get("from") ?? undefined;
+    const to = qs.get("to") ?? undefined;
+    const stats = repo.getAggregateStats(from, to);
     sendJson(res, 200, stats ?? {});
     return;
   }
@@ -192,8 +195,10 @@ function handleApiRoute(url: string, repo: SessionRepo, res: http.ServerResponse
     const qs = new URL(url, "http://x").searchParams;
     const limit = Math.min(500, Math.max(1, parseInt(qs.get("limit") ?? "50", 10)));
     const offset = Math.max(0, parseInt(qs.get("offset") ?? "0", 10));
-    const sessions = repo.listSessions(limit, offset);
-    const total = repo.countSessions();
+    const from = qs.get("from") ?? undefined;
+    const to = qs.get("to") ?? undefined;
+    const sessions = repo.listSessions(limit, offset, from, to);
+    const total = repo.countSessions(from, to);
     sendJson(res, 200, { sessions, total, limit, offset });
     return;
   }
@@ -273,6 +278,7 @@ function handleApiRoute(url: string, repo: SessionRepo, res: http.ServerResponse
 
   if (path === "/api/tasks/turns") {
     const qs = new URL(url, "http://x").searchParams;
+    const untagged = qs.get("untagged") === "true";
     const tagsParam = qs.get("tags") ?? "";
     const tags = tagsParam ? tagsParam.split(",").map(t => t.trim()).filter(Boolean) : undefined;
     const mode = qs.get("mode") === "all" ? "all" as const : "any" as const;
@@ -280,7 +286,7 @@ function handleApiRoute(url: string, repo: SessionRepo, res: http.ServerResponse
     const to = qs.get("to") ?? undefined;
     const limit = Math.min(200, Math.max(1, parseInt(qs.get("limit") ?? "50", 10)));
     const offset = Math.max(0, parseInt(qs.get("offset") ?? "0", 10));
-    const turns = repo.getTaggedTurns({ tags, mode, from, to, limit, offset });
+    const turns = repo.getTaggedTurns({ tags, untagged, mode, from, to, limit, offset });
     sendJson(res, 200, turns);
     return;
   }
