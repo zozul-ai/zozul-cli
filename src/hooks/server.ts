@@ -377,7 +377,11 @@ function parseTimeRange(url: string): TimeRange {
   const unit = rangeMatch[2];
   const ms = unit === "h" ? n * 3_600_000 : n * 24 * 3_600_000;
   const from = new Date(now.getTime() - ms).toISOString();
-  return { from, to: now.toISOString(), stepSeconds: autoStep(ms) };
+  const qs2 = new URL(url, "http://x").searchParams;
+  const stepSeconds = qs2.has("step") && qs2.get("step") !== "auto"
+    ? parseStepParam(qs2.get("step")!)
+    : autoStep(ms);
+  return { from, to: now.toISOString(), stepSeconds };
 }
 
 const MAX_BODY_BYTES = 50 * 1024 * 1024; // 50 MB

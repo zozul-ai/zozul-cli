@@ -703,6 +703,9 @@ function toggleDataSource() {
   if (!remoteAvailable) return;
   dataSource = dataSource === 'remote' ? 'local' : 'remote';
   updateBadge();
+  checkTeamAccess();
+  // If on team view and switched to local, go back to summary
+  if (dataSource === 'local' && currentView === 'team') showView('summary');
   loadDashboard();
 }
 
@@ -1568,19 +1571,24 @@ function renderSessionsTable(sessions) {
 // ── Team View ──
 
 async function checkTeamAccess() {
+  // Team view only works with remote API
+  if (dataSource !== 'remote') {
+    document.getElementById('team-tab').style.display = 'none';
+    document.getElementById('team-divider').style.display = 'none';
+    return;
+  }
   try {
     const data = await fetchJson('/api/teams/stats');
     if (data && data.team_id) {
       teamData = data;
       document.getElementById('team-tab').style.display = '';
       document.getElementById('team-divider').style.display = '';
-      // Populate selector (single team for now, extensible)
       const sel = document.getElementById('team-selector');
       sel.innerHTML = '<option value="' + data.team_id + '">' + escHtml(data.team_name) + '</option>';
     }
   } catch {
-    // Not a manager or no team — hide tab
     document.getElementById('team-tab').style.display = 'none';
+    document.getElementById('team-divider').style.display = 'none';
   }
 }
 

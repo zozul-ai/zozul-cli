@@ -304,6 +304,19 @@ export class SessionRepo {
   }
 
   getCostTimeSeries(from: string, to: string, stepSeconds: number): { timestamp: string; cost: number }[] {
+    // Use date() for daily grouping to avoid timezone-related splits
+    if (stepSeconds >= 86400) {
+      return this.db.prepare(`
+        SELECT
+          date(timestamp) as timestamp,
+          SUM(value) as cost
+        FROM otel_metrics
+        WHERE name = 'claude_code.cost.usage'
+          AND timestamp >= ? AND timestamp <= ?
+        GROUP BY 1
+        ORDER BY 1 ASC
+      `).all(from, to) as { timestamp: string; cost: number }[];
+    }
     return this.db.prepare(`
       SELECT
         datetime((CAST(strftime('%s', timestamp) AS INTEGER) / CAST(? AS INTEGER)) * CAST(? AS INTEGER), 'unixepoch') as timestamp,
