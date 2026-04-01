@@ -492,6 +492,7 @@
         </tr></thead>
         <tbody id="team-tasks-table"></tbody>
       </table>
+      <div id="team-tasks-pagination" style="display:flex;gap:6px;align-items:center;justify-content:center;padding:12px 16px;border-top:1px solid var(--border)"></div>
     </div>
   </div>
 
@@ -1569,6 +1570,7 @@ async function loadTeam() {
     allTeamMembers = stats.members || [];
     renderTeamMembers(sortData(allTeamMembers, sortState['team-members']));
     allTeamTasks = taskGroups || [];
+    teamTasksPage = 0;
     renderTeamTasks(sortData(allTeamTasks, sortState['team-tasks']));
   } catch (e) {
     console.error('team load failed', e);
@@ -1610,13 +1612,23 @@ function renderTeamMembers(members) {
   }).join('');
 }
 
+let teamTasksPage = 0;
+const TEAM_TASKS_PAGE = 10;
+
 function renderTeamTasks(tasks) {
   const tbody = document.getElementById('team-tasks-table');
+  const pag = document.getElementById('team-tasks-pagination');
   if (!tasks.length) {
     tbody.innerHTML = '<tr><td colspan="4" class="empty">No tasks.</td></tr>';
+    pag.innerHTML = '';
     return;
   }
-  tbody.innerHTML = tasks.map(g => {
+  const totalPages = Math.ceil(tasks.length / TEAM_TASKS_PAGE);
+  teamTasksPage = Math.min(teamTasksPage, totalPages - 1);
+  const start = teamTasksPage * TEAM_TASKS_PAGE;
+  const page = tasks.slice(start, start + TEAM_TASKS_PAGE);
+
+  tbody.innerHTML = page.map(g => {
     const tags = g.tags.split('|');
     const pills = tags.map(t =>
       '<span class="tag-pill' + (t === 'Untagged' ? ' untagged' : '') + '">' + escHtml(t) + '</span>'
@@ -1628,6 +1640,11 @@ function renderTeamTasks(tasks) {
       '<td>' + fmtNum(g.human_interventions) + '</td>' +
       '</tr>';
   }).join('');
+
+  pag.innerHTML = totalPages <= 1 ? '' :
+    (teamTasksPage > 0 ? '<button class="time-btn" onclick="teamTasksPage--;renderTeamTasks(sortData(allTeamTasks,sortState[\'team-tasks\']))">Prev</button>' : '') +
+    '<span style="font-size:11px;color:var(--text-dim);font-family:var(--mono)">' + (teamTasksPage + 1) + ' / ' + totalPages + '</span>' +
+    (teamTasksPage < totalPages - 1 ? '<button class="time-btn" onclick="teamTasksPage++;renderTeamTasks(sortData(allTeamTasks,sortState[\'team-tasks\']))">Next</button>' : '');
 }
 
 // ── Loading orchestration ──
