@@ -104,6 +104,13 @@
   }
   .nav-tab:hover { color: var(--text); }
   .nav-tab.active { color: var(--accent-light); border-bottom-color: var(--accent); }
+  .nav-divider {
+    width: 1px;
+    height: 20px;
+    background: var(--border);
+    align-self: center;
+    margin: 0 8px;
+  }
 
   .container { max-width: 1280px; margin: 0 auto; padding: 24px; }
 
@@ -440,6 +447,8 @@
   <button class="nav-tab" data-view="tasks">Tasks</button>
   <button class="nav-tab" data-view="tags">Tags</button>
   <button class="nav-tab" data-view="sessions">Sessions</button>
+  <span class="nav-divider" id="team-divider" style="display:none"></span>
+  <button class="nav-tab" data-view="team" id="team-tab" style="display:none">Team</button>
 </div>
 
 <div class="container">
@@ -450,6 +459,40 @@
     <div class="panel">
       <div class="panel-header"><span>Cost by Project</span></div>
       <ul class="project-list" id="project-breakdown"></ul>
+    </div>
+  </div>
+
+  <!-- Team View -->
+  <div id="view-team" class="view">
+    <div style="display:flex;align-items:center;gap:16px;margin-bottom:24px">
+      <select id="team-selector" class="panel-filter" style="width:auto" onchange="onTeamSelect()"></select>
+      <div class="time-selector" style="margin-bottom:0"></div>
+    </div>
+    <div class="stats-grid" id="team-stats"></div>
+    <div class="panel">
+      <div class="panel-header"><span>Members</span></div>
+      <table>
+        <thead><tr>
+          <th class="sortable" data-sort="team-members:user_name">Name</th>
+          <th class="sortable" data-sort="team-members:total_sessions">Sessions</th>
+          <th class="sortable desc" data-sort="team-members:total_cost_usd">Cost</th>
+          <th class="sortable" data-sort="team-members:total_duration_ms">Active Time</th>
+        </tr></thead>
+        <tbody id="team-members-table"></tbody>
+      </table>
+    </div>
+    <div class="panel">
+      <div class="panel-header"><span>Team Tasks</span></div>
+      <table>
+        <thead><tr>
+          <th class="sortable" data-sort="team-tasks:tags">Task</th>
+          <th class="sortable" data-sort="team-tasks:total_duration_ms">Time</th>
+          <th class="sortable desc" data-sort="team-tasks:total_cost_usd">Cost</th>
+          <th class="sortable" data-sort="team-tasks:human_interventions">Human Interventions</th>
+        </tr></thead>
+        <tbody id="team-tasks-table"></tbody>
+      </table>
+      <div id="team-tasks-pagination" style="display:flex;gap:6px;align-items:center;justify-content:center;padding:12px 16px;border-top:1px solid var(--border)"></div>
     </div>
   </div>
 
@@ -598,7 +641,12 @@ let sortState = {
   tasks: { key: 'total_cost_usd', dir: 'desc' },
   tags: { key: 'total_cost_usd', dir: 'desc' },
   sessions: { key: 'started_at', dir: 'desc' },
+  'team-members': { key: 'total_cost_usd', dir: 'desc' },
+  'team-tasks': { key: 'total_cost_usd', dir: 'desc' },
 };
+let teamData = null;
+let allTeamMembers = [];
+let allTeamTasks = [];
 let allSessions = [];
 let sessionsTotal = 0;
 let sessionsOffset = 0;
@@ -766,6 +814,16 @@ function copyText(text) {
   });
 }
 
+function timeQueryString() {
+  if (currentTimeWindow === 'all') return '';
+  const now = new Date();
+  const ms = currentTimeWindow.endsWith('d')
+    ? parseInt(currentTimeWindow) * 86400000
+    : parseInt(currentTimeWindow) * 3600000;
+  const from = new Date(now.getTime() - ms).toISOString();
+  return 'from=' + encodeURIComponent(from) + '&to=' + encodeURIComponent(now.toISOString());
+}
+
 // ── Navigation ──
 
 function showView(name) {
@@ -776,7 +834,7 @@ function showView(name) {
 
   // Update tab highlight for main views
   document.querySelectorAll('.nav-tab').forEach(t => t.classList.remove('active'));
-  const mainView = ['summary', 'sessions', 'tasks', 'tags'].includes(name) ? name : null;
+  const mainView = ['summary', 'sessions', 'tasks', 'tags', 'team'].includes(name) ? name : null;
   if (mainView) {
     const tab = document.querySelector('.nav-tab[data-view="' + mainView + '"]');
     if (tab) tab.classList.add('active');
@@ -821,6 +879,8 @@ document.addEventListener('click', e => {
     if (table === 'tasks') renderTaskTable(sortData(allTaskGroups, state));
     else if (table === 'tags') renderTagTable(sortData(allTagStats, state));
     else if (table === 'sessions') renderSessionsTable(sortData(allSessions, state));
+    else if (table === 'team-members') renderTeamMembers(sortData(allTeamMembers, state));
+    else if (table === 'team-tasks') renderTeamTasks(sortData(allTeamTasks, state));
     return;
   }
 });
@@ -1476,6 +1536,117 @@ function renderSessionsTable(sessions) {
   }).join('');
 }
 
+// ── Team View ──
+
+async function checkTeamAccess() {
+  try {
+    const data = await fetchJson('/api/teams/stats');
+    if (data && data.team_id) {
+      teamData = data;
+      document.getElementById('team-tab').style.display = '';
+      document.getElementById('team-divider').style.display = '';
+      // Populate selector (single team for now, extensible)
+      const sel = document.getElementById('team-selector');
+      sel.innerHTML = '<option value="' + data.team_id + '">' + escHtml(data.team_name) + '</option>';
+    }
+  } catch {
+    // Not a manager or no team — hide tab
+    document.getElementById('team-tab').style.display = 'none';
+  }
+}
+
+function onTeamSelect() { loadTeam(); }
+
+async function loadTeam() {
+  try {
+    const timeQs = timeQueryString();
+    const timeParam = timeQs ? '?' + timeQs : '';
+    const [stats, taskGroups] = await Promise.all([
+      fetchJson('/api/teams/stats' + timeParam),
+      fetchJson('/api/teams/task-groups' + timeParam),
+    ]);
+    teamData = stats;
+    renderTeamStats(stats);
+    allTeamMembers = stats.members || [];
+    renderTeamMembers(sortData(allTeamMembers, sortState['team-members']));
+    allTeamTasks = taskGroups || [];
+    teamTasksPage = 0;
+    renderTeamTasks(sortData(allTeamTasks, sortState['team-tasks']));
+  } catch (e) {
+    console.error('team load failed', e);
+  }
+}
+
+function renderTeamStats(s) {
+  const grid = document.getElementById('team-stats');
+  grid.innerHTML = [
+    { label: 'Total Cost', value: fmtCost(s.total_cost_usd), hero: true },
+    { label: 'Sessions', value: fmtNum(s.total_sessions), hero: true },
+    { label: 'Members', value: fmtNum((s.members || []).length), hero: true },
+  ].map(c =>
+    '<div class="stat-card' + (c.hero ? ' hero' : '') + '">' +
+      '<div class="label">' + c.label + '</div>' +
+      '<div class="value">' + c.value + '</div>' +
+    '</div>'
+  ).join('');
+}
+
+function renderTeamMembers(members) {
+  const tbody = document.getElementById('team-members-table');
+  if (!members.length) {
+    tbody.innerHTML = '<tr><td colspan="4" class="empty">No members.</td></tr>';
+    return;
+  }
+  const maxCost = Math.max(...members.map(m => m.total_cost_usd || 0), 1);
+  tbody.innerHTML = members.map(m => {
+    const pct = Math.round((m.total_cost_usd || 0) / maxCost * 100);
+    return '<tr>' +
+      '<td>' + escHtml(m.user_name || 'Unknown') + '</td>' +
+      '<td>' + fmtNum(m.total_sessions) + '</td>' +
+      '<td><div style="display:flex;align-items:center;gap:10px">' +
+        '<div class="project-bar-wrap"><div class="project-bar" style="width:' + pct + '%"></div></div>' +
+        '<span class="badge badge-cost">' + fmtCost(m.total_cost_usd) + '</span>' +
+      '</div></td>' +
+      '<td>' + fmtDuration(m.total_duration_ms) + '</td>' +
+      '</tr>';
+  }).join('');
+}
+
+let teamTasksPage = 0;
+const TEAM_TASKS_PAGE = 10;
+
+function renderTeamTasks(tasks) {
+  const tbody = document.getElementById('team-tasks-table');
+  const pag = document.getElementById('team-tasks-pagination');
+  if (!tasks.length) {
+    tbody.innerHTML = '<tr><td colspan="4" class="empty">No tasks.</td></tr>';
+    pag.innerHTML = '';
+    return;
+  }
+  const totalPages = Math.ceil(tasks.length / TEAM_TASKS_PAGE);
+  teamTasksPage = Math.min(teamTasksPage, totalPages - 1);
+  const start = teamTasksPage * TEAM_TASKS_PAGE;
+  const page = tasks.slice(start, start + TEAM_TASKS_PAGE);
+
+  tbody.innerHTML = page.map(g => {
+    const tags = g.tags.split('|');
+    const pills = tags.map(t =>
+      '<span class="tag-pill' + (t === 'Untagged' ? ' untagged' : '') + '">' + escHtml(t) + '</span>'
+    ).join('');
+    return '<tr>' +
+      '<td>' + pills + '</td>' +
+      '<td>' + fmtDuration(g.total_duration_ms) + '</td>' +
+      '<td><span class="badge badge-cost">' + fmtCost(g.total_cost_usd) + '</span></td>' +
+      '<td>' + fmtNum(g.human_interventions) + '</td>' +
+      '</tr>';
+  }).join('');
+
+  pag.innerHTML = totalPages <= 1 ? '' :
+    (teamTasksPage > 0 ? '<button class="time-btn" onclick="teamTasksPage--;renderTeamTasks(sortData(allTeamTasks,sortState[\'team-tasks\']))">Prev</button>' : '') +
+    '<span style="font-size:11px;color:var(--text-dim);font-family:var(--mono)">' + (teamTasksPage + 1) + ' / ' + totalPages + '</span>' +
+    (teamTasksPage < totalPages - 1 ? '<button class="time-btn" onclick="teamTasksPage++;renderTeamTasks(sortData(allTeamTasks,sortState[\'team-tasks\']))">Next</button>' : '');
+}
+
 // ── Loading orchestration ──
 
 async function loadViewData(view) {
@@ -1483,6 +1654,7 @@ async function loadViewData(view) {
   else if (view === 'sessions') await loadSessions();
   else if (view === 'tasks') await loadTasks();
   else if (view === 'tags') await loadTags();
+  else if (view === 'team') await loadTeam();
 }
 
 async function loadDashboard() {
@@ -1507,7 +1679,7 @@ function manualRefresh() {
 function scheduleAutoRefresh() {
   autoRefreshTimer = setTimeout(async () => {
     // Only auto-refresh main views, not detail views
-    if (['summary', 'sessions', 'tasks', 'tags'].includes(currentView)) {
+    if (['summary', 'sessions', 'tasks', 'tags', 'team'].includes(currentView)) {
       await loadDashboard();
     }
     scheduleAutoRefresh();
@@ -1516,7 +1688,10 @@ function scheduleAutoRefresh() {
 
 // ── Init ──
 
-detectDataSource().then(() => loadDashboard()).then(scheduleAutoRefresh);
+detectDataSource().then(() => {
+  checkTeamAccess();
+  return loadDashboard();
+}).then(scheduleAutoRefresh);
 </script>
 </body>
 </html>
