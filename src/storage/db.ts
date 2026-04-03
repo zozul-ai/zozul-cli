@@ -126,6 +126,18 @@ function migrate(db: Database.Database): void {
     try { db.exec(sql); } catch { /* column already exists */ }
   }
   db.exec(`CREATE INDEX IF NOT EXISTS idx_sessions_parent ON sessions(parent_session_id)`);
+
+  // Deduplicate otel_metrics and add unique constraint to match backend
+  try {
+    db.exec(`
+      DELETE FROM otel_metrics WHERE id NOT IN (
+        SELECT MIN(id) FROM otel_metrics
+        GROUP BY session_id, name, timestamp, json_extract(attributes, '$.type')
+      );
+      CREATE UNIQUE INDEX uq_otel_metrics_session_name_ts_type
+        ON otel_metrics(session_id, name, timestamp, json_extract(attributes, '$.type'));
+    `);
+  } catch { /* index already exists */ }
 }
 
 export type SessionRow = {

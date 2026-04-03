@@ -36,14 +36,14 @@ export class SessionRepo {
         ended_at      = COALESCE(@ended_at, ended_at),
         total_turns   = @total_turns,
         model         = COALESCE(@model, model),
-        -- Use MAX so OTEL values aren't clobbered by JSONL re-ingest,
-        -- but JSONL values fill in as a floor for sessions without OTEL data.
-        total_input_tokens          = MAX(total_input_tokens, @total_input_tokens),
-        total_output_tokens         = MAX(total_output_tokens, @total_output_tokens),
-        total_cache_read_tokens     = MAX(total_cache_read_tokens, @total_cache_read_tokens),
-        total_cache_creation_tokens = MAX(total_cache_creation_tokens, @total_cache_creation_tokens),
-        total_cost_usd              = MAX(total_cost_usd, @total_cost_usd),
-        total_duration_ms           = MAX(total_duration_ms, @total_duration_ms)
+        -- JSONL values act as initial estimates; recomputeSessionCostsFromOtel
+        -- overwrites with authoritative OTEL data when available.
+        total_input_tokens          = @total_input_tokens,
+        total_output_tokens         = @total_output_tokens,
+        total_cache_read_tokens     = @total_cache_read_tokens,
+        total_cache_creation_tokens = @total_cache_creation_tokens,
+        total_cost_usd              = @total_cost_usd,
+        total_duration_ms           = @total_duration_ms
     `).run({
       ...session,
       ended_at: session.ended_at ?? null,
@@ -180,15 +180,17 @@ export class SessionRepo {
     `).run(event);
   }
 
-  listSessions(limit = 50, offset = 0, from?: string, to?: string): SessionRow[] {
+  listSessions(limit = 50, offset = 0, from?: string, to?: string): (SessionRow & { user_turns: number })[] {
     if (from && to) {
       return this.db.prepare(`
-        SELECT * FROM sessions WHERE parent_session_id IS NULL AND started_at >= ? AND started_at <= ? ORDER BY started_at DESC LIMIT ? OFFSET ?
-      `).all(from, to, limit, offset) as SessionRow[];
+        SELECT s.*, (SELECT COUNT(*) FROM turns t WHERE t.session_id = s.id AND t.is_real_user = 1) as user_turns
+        FROM sessions s WHERE s.parent_session_id IS NULL AND s.started_at >= ? AND s.started_at <= ? ORDER BY s.started_at DESC LIMIT ? OFFSET ?
+      `).all(from, to, limit, offset) as (SessionRow & { user_turns: number })[];
     }
     return this.db.prepare(`
-      SELECT * FROM sessions WHERE parent_session_id IS NULL ORDER BY started_at DESC LIMIT ? OFFSET ?
-    `).all(limit, offset) as SessionRow[];
+      SELECT s.*, (SELECT COUNT(*) FROM turns t WHERE t.session_id = s.id AND t.is_real_user = 1) as user_turns
+      FROM sessions s WHERE s.parent_session_id IS NULL ORDER BY s.started_at DESC LIMIT ? OFFSET ?
+    `).all(limit, offset) as (SessionRow & { user_turns: number })[];
   }
 
   countSessions(from?: string, to?: string): number {
@@ -200,8 +202,11 @@ export class SessionRepo {
     return row.n;
   }
 
-  getSession(id: string): SessionRow | undefined {
-    return this.db.prepare(`SELECT * FROM sessions WHERE id = ?`).get(id) as SessionRow | undefined;
+  getSession(id: string): (SessionRow & { user_turns: number }) | undefined {
+    return this.db.prepare(`
+      SELECT s.*, (SELECT COUNT(*) FROM turns t WHERE t.session_id = s.id AND t.is_real_user = 1) as user_turns
+      FROM sessions s WHERE s.id = ?
+    `).get(id) as (SessionRow & { user_turns: number }) | undefined;
   }
 
   getSubSessions(parentSessionId: string): SessionRow[] {
@@ -270,7 +275,7 @@ export class SessionRepo {
     timestamp: string;
   }): void {
     this.db.prepare(`
-      INSERT INTO otel_metrics (name, value, attributes, session_id, model, timestamp)
+      INSERT OR IGNORE INTO otel_metrics (name, value, attributes, session_id, model, timestamp)
       VALUES (@name, @value, @attributes, @session_id, @model, @timestamp)
     `).run(metric);
   }
@@ -284,7 +289,7 @@ export class SessionRepo {
     timestamp: string;
   }[]): void {
     const stmt = this.db.prepare(`
-      INSERT INTO otel_metrics (name, value, attributes, session_id, model, timestamp)
+      INSERT OR IGNORE INTO otel_metrics (name, value, attributes, session_id, model, timestamp)
       VALUES (@name, @value, @attributes, @session_id, @model, @timestamp)
     `);
     const tx = this.db.transaction((rows: typeof metrics) => {
@@ -639,7 +644,7 @@ export class SessionRepo {
   }
 
   recomputeSessionCostsFromOtel(): number {
-    // Recompute from raw OTEL for sessions that have metrics
+    // Step 1: Recompute from raw OTEL for sessions that have metrics (authoritative)
     const updated = this.db.prepare(`
       UPDATE sessions SET
         total_cost_usd = COALESCE((
@@ -649,31 +654,37 @@ export class SessionRepo {
         total_input_tokens = COALESCE((
           SELECT SUM(value) FROM otel_metrics
           WHERE name = 'claude_code.token.usage' AND json_extract(attributes, '$.type') = 'input' AND session_id = sessions.id
-        ), total_input_tokens),
+        ), 0),
         total_output_tokens = COALESCE((
           SELECT SUM(value) FROM otel_metrics
           WHERE name = 'claude_code.token.usage' AND json_extract(attributes, '$.type') = 'output' AND session_id = sessions.id
-        ), total_output_tokens),
+        ), 0),
         total_cache_read_tokens = COALESCE((
           SELECT SUM(value) FROM otel_metrics
           WHERE name = 'claude_code.token.usage' AND json_extract(attributes, '$.type') = 'cacheRead' AND session_id = sessions.id
-        ), total_cache_read_tokens),
+        ), 0),
         total_cache_creation_tokens = COALESCE((
           SELECT SUM(value) FROM otel_metrics
           WHERE name = 'claude_code.token.usage' AND json_extract(attributes, '$.type') = 'cacheCreation' AND session_id = sessions.id
-        ), total_cache_creation_tokens),
-        total_duration_ms = COALESCE((
-          SELECT SUM(value) * 1000 FROM otel_metrics
-          WHERE name = 'claude_code.active_time.total' AND session_id = sessions.id
-        ), total_duration_ms)
+        ), 0)
       WHERE id IN (SELECT DISTINCT session_id FROM otel_metrics WHERE session_id IS NOT NULL)
     `).run();
 
-    // Zero out cost/duration for sessions with no OTEL backing (unverifiable)
+    // Step 2: Recompute duration from turns for all sessions
     this.db.prepare(`
-      UPDATE sessions SET total_cost_usd = 0, total_duration_ms = 0
-      WHERE (total_cost_usd > 0 OR total_duration_ms > 0)
-        AND id NOT IN (SELECT DISTINCT session_id FROM otel_metrics WHERE session_id IS NOT NULL)
+      UPDATE sessions SET
+        total_duration_ms = COALESCE((
+          SELECT SUM(duration_ms) FROM turns WHERE session_id = sessions.id
+        ), 0)
+    `).run();
+
+    // Step 3: Fallback for sessions without OTEL — use SUM(turns.cost_usd)
+    this.db.prepare(`
+      UPDATE sessions SET
+        total_cost_usd = COALESCE((
+          SELECT SUM(cost_usd) FROM turns WHERE session_id = sessions.id
+        ), 0)
+      WHERE id NOT IN (SELECT DISTINCT session_id FROM otel_metrics WHERE session_id IS NOT NULL)
     `).run();
 
     return updated.changes;

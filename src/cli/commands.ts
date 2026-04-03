@@ -350,6 +350,11 @@ export function buildCli(): Command {
       console.log("Scanning for Claude Code session files...");
       const result = await ingestAllSessions(repo, { force: opts.force, noTag: opts.tag === false });
       console.log(`Ingested: ${result.ingested}  Skipped: ${result.skipped}`);
+
+      // Recompute costs from OTEL to overwrite JSONL estimates with authoritative data
+      const fixed = repo.recomputeSessionCostsFromOtel();
+      if (fixed > 0) console.log(`Recomputed costs for ${fixed} sessions from OTEL data`);
+
       db.close();
     });
 

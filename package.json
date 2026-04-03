@@ -1,6 +1,6 @@
 {
   "name": "zozul-cli",
-  "version": "0.3.8",
+  "version": "0.3.9",
   "description": "Observability for Claude Code — track token usage, costs, turns, and conversation history",
   "readmeFilename": "README.md",
   "type": "module",

@@ -109,21 +109,25 @@ Eight tables, all in `~/.zozul/zozul.db` (WAL mode, foreign keys ON).
 One row per Claude Code session. Updated from both JSONL and OTEL.
 
 ```sql
-id TEXT PRIMARY KEY           -- session UUID (from JSONL filename)
+id TEXT PRIMARY KEY           -- session UUID (from JSONL filename) or agent-* for sub-sessions
 project_path TEXT             -- decoded from transcript path
+parent_session_id TEXT        -- parent session ID for agent sub-sessions, NULL for top-level
+agent_type TEXT               -- e.g. 'Explore', 'Plan', 'general-purpose' (from .meta.json)
 started_at TEXT NOT NULL      -- ISO timestamp, from JSONL
 ended_at TEXT                 -- kept current by OTEL batches
-total_input_tokens INTEGER    -- OTEL-accumulated (MAX with JSONL)
+total_input_tokens INTEGER    -- OTEL-authoritative (recomputed from otel_metrics)
 total_output_tokens INTEGER
 total_cache_read_tokens INTEGER
 total_cache_creation_tokens INTEGER
-total_cost_usd REAL           -- OTEL only (JSONL always 0)
+total_cost_usd REAL           -- OTEL-authoritative; fallback: SUM(turns.cost_usd)
 total_turns INTEGER           -- from JSONL (count of parsed turns)
-total_duration_ms INTEGER     -- OTEL active_time accumulated
+total_duration_ms INTEGER     -- SUM(turns.duration_ms)
 model TEXT                    -- last model seen
 ```
 
-Upsert semantics: `MIN(started_at)`, `MAX()` for all metric fields, `COALESCE` for nullable strings. This means re-ingesting from JSONL never destroys OTEL-accumulated cost/duration.
+Upsert semantics: `MIN(started_at)`, simple replacement for metric fields, `COALESCE` for nullable strings. After ingest, `recomputeSessionCostsFromOtel` overwrites metrics with authoritative OTEL data. Sessions without OTEL fall back to `SUM(turns.cost_usd)`.
+
+Agent sub-sessions are discovered from `<session-uuid>/subagents/` directories. They share the parent's `project_path` and have `parent_session_id` set. Display queries filter `WHERE parent_session_id IS NULL` to show only top-level sessions. OTEL reports all cost/tokens under the parent session ID — agent sub-sessions have no OTEL data.
 
 ### `turns`
 One row per message turn. Unique on `(session_id, turn_index)`.
@@ -171,7 +175,7 @@ payload TEXT                  -- full JSON body
 ```
 
 ### `otel_metrics`
-Raw OTEL metric data points, append-only.
+Raw OTEL metric data points, append-only. Deduplicated via unique index on `(session_id, name, timestamp, type)`.
 
 ```sql
 id INTEGER PRIMARY KEY AUTOINCREMENT
@@ -181,9 +185,10 @@ attributes TEXT               -- full JSON of flattened OTLP attributes
 session_id TEXT               -- extracted from attributes
 model TEXT                    -- extracted from attributes
 timestamp TEXT
+UNIQUE(session_id, name, timestamp, json_extract(attributes, '$.type'))
 ```
 
-Dashboard charts query this table directly (not `sessions`) for time-series data.
+Inserts use `INSERT OR IGNORE` to skip duplicates. Dashboard charts query this table directly (not `sessions`) for time-series data.
 
 ### `otel_events`
 Raw OTEL log records, append-only.
@@ -225,9 +230,11 @@ updated_at TEXT
 
 **JSONL is the only source for full conversation text.** OTEL events can include prompt text when `OTEL_LOG_USER_PROMPTS=1`, but the assistant's full response is only in the JSONL transcript.
 
-**Sessions table uses MAX() semantics on upsert.** This means the highest value seen from any source wins. OTEL running totals always exceed JSONL partial values, so OTEL naturally wins for metrics without any special logic.
+**Sessions table uses simple replacement on upsert for metric fields.** JSONL values act as initial estimates. `recomputeSessionCostsFromOtel` runs after ingest and on server startup to overwrite with authoritative OTEL data. For sessions without OTEL, cost falls back to `SUM(turns.cost_usd)`. Duration is always `SUM(turns.duration_ms)`.
 
-**OTEL deltas are accumulated, not replaced.** `updateSessionFromOtel` does `total_cost_usd = total_cost_usd + @cost`. This is correct because OTEL sends deltas per window. Do not change this to an assignment.
+**OTEL deltas are accumulated, not replaced.** `updateSessionFromOtel` does `total_cost_usd = total_cost_usd + @cost`. This is correct because OTEL sends deltas per window. Do not change this to an assignment. The accumulated values are periodically reconciled by `recomputeSessionCostsFromOtel` which recomputes from raw `otel_metrics` rows.
+
+**OTEL metrics are deduplicated locally.** The `otel_metrics` table has a unique index on `(session_id, name, timestamp, type)` matching the backend's constraint. Without this, `SUM(value)` double-counts duplicates, inflating costs. Inserts use `INSERT OR IGNORE`.
 
 **Tool uses are replaced, not appended, on re-ingest.** `replaceToolUsesForTurn` deletes then re-inserts. This prevents duplication when the watcher re-ingests a live session file on every new turn.
 

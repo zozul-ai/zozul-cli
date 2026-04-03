@@ -512,7 +512,7 @@
           <th class="sortable" data-sort="sessions:project_path">Project</th>
           <th class="sortable" data-sort="sessions:started_at">Started</th>
           <th class="sortable" data-sort="sessions:total_duration_ms">Duration</th>
-          <th class="sortable" data-sort="sessions:total_turns">Turns</th>
+          <th class="sortable" data-sort="sessions:user_turns">Prompts</th>
           <th class="sortable desc" data-sort="sessions:total_cost_usd">Cost</th>
           <th class="sortable" data-sort="sessions:model">Model</th>
         </tr></thead>
@@ -1360,7 +1360,7 @@ async function showSession(id, returnTo) {
   const [session, turns, subagents] = await Promise.all([
     fetchJson('/api/sessions/' + id),
     fetchJson('/api/sessions/' + id + '/turns'),
-    fetchJson('/api/sessions/' + id + '/subagents'),
+    fetchJson('/api/sessions/' + id + '/subagents').catch(() => []),
   ]);
 
   const stats = [
@@ -1368,7 +1368,7 @@ async function showSession(id, returnTo) {
     { label: 'Project', value: '<span title="' + escHtml(session.project_path ?? '') + '">' + escHtml(basename(session.project_path)) + '</span>' },
     { label: 'Model', value: '<span style="font-family:var(--mono);font-size:13px">' + escHtml(session.model ?? '\u2014') + '</span>' },
     { label: 'Duration', value: fmtDuration(session.total_duration_ms) },
-    { label: 'Turns', value: session.total_turns },
+    { label: 'Prompts', value: session.user_turns ?? session.total_turns },
     { label: 'Input Tokens', value: fmtNum(session.total_input_tokens) },
     { label: 'Output Tokens', value: fmtNum(session.total_output_tokens) },
     { label: 'Cost', value: fmtCost(session.total_cost_usd) },
@@ -1535,7 +1535,7 @@ function renderSessionsTable(sessions) {
       '<td' + projAttr + '>' + escHtml(proj) + '</td>' +
       '<td title="' + fmtAbsolute(s.started_at) + '">' + fmtRelative(s.started_at) + '</td>' +
       '<td>' + fmtDuration(s.total_duration_ms) + '</td>' +
-      '<td>' + (s.total_turns ?? 0) + '</td>' +
+      '<td>' + (s.user_turns ?? s.total_turns ?? 0) + '</td>' +
       '<td><span class="badge badge-cost">' + fmtCost(s.total_cost_usd) + '</span></td>' +
       '<td style="font-family:var(--mono);font-size:11px;color:var(--text-dim)">' + escHtml(s.model ?? '\u2014') + '</td>' +
       '</tr>';
