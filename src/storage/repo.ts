@@ -617,7 +617,7 @@ export class SessionRepo {
    * Fixes drift caused by late-start catch-up batches or duplicate processing.
    * Safe to call repeatedly — always produces correct values from append-only source data.
    */
-  getTaskGroups(from?: string, to?: string): { tags: string; turn_count: number; human_interventions: number; total_duration_ms: number; total_cost_usd: number; last_seen: string }[] {
+  getTaskGroups(from?: string, to?: string): { tags: string; turn_count: number; human_interventions: number; total_duration_ms: number; total_cost_usd: number; total_tokens: number; last_seen: string }[] {
     const timeFilter = from && to ? " AND t.timestamp >= ? AND t.timestamp <= ?" : "";
     const params: unknown[] = from && to ? [from, to] : [];
 
@@ -633,6 +633,7 @@ export class SessionRepo {
         SUM(CASE WHEN t.is_real_user = 1 THEN 1 ELSE 0 END) as human_interventions,
         COALESCE(SUM(t.duration_ms), 0) as total_duration_ms,
         COALESCE(SUM(${PROPORTIONAL_COST_SQL}), 0) as total_cost_usd,
+        COALESCE(SUM(t.input_tokens), 0) + COALESCE(SUM(t.output_tokens), 0) + COALESCE(SUM(t.cache_read_tokens), 0) as total_tokens,
         MAX(t.timestamp) as last_seen
       FROM turns t
       LEFT JOIN turn_tag_sets tts ON tts.turn_id = t.id
@@ -640,7 +641,7 @@ export class SessionRepo {
       WHERE s.parent_session_id IS NULL${timeFilter}
       GROUP BY COALESCE(tts.tag_set, 'Untagged')
       ORDER BY last_seen DESC
-    `).all(...params) as { tags: string; turn_count: number; human_interventions: number; total_duration_ms: number; total_cost_usd: number; last_seen: string }[];
+    `).all(...params) as { tags: string; turn_count: number; human_interventions: number; total_duration_ms: number; total_cost_usd: number; total_tokens: number; last_seen: string }[];
   }
 
   recomputeSessionCostsFromOtel(): number {
