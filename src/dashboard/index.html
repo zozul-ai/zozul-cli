@@ -1110,7 +1110,7 @@ async function showTaskDetail(tagSet) {
     } else {
       stats = await fetchJson('/api/tasks/stats?' + qs);
     }
-    const turns = await fetchJson('/api/tasks/turns?' + qs + '&limit=' + PAGE_SIZE + '&offset=0');
+    const turns = await enrichTurnsWithCost(await fetchJson('/api/tasks/turns?' + qs + '&limit=' + PAGE_SIZE + '&offset=0'));
 
     statsEl.innerHTML = [
       { label: 'Task', value: '<span style="font-size:14px">' + pills + '</span>' },
@@ -1170,13 +1170,13 @@ function taskDetailQs() {
 
 async function taskDetailNext() {
   taskDetailOffset += PAGE_SIZE;
-  const turns = await fetchJson('/api/tasks/turns?' + taskDetailQs() + '&limit=' + PAGE_SIZE + '&offset=' + taskDetailOffset);
+  const turns = await enrichTurnsWithCost(await fetchJson('/api/tasks/turns?' + taskDetailQs() + '&limit=' + PAGE_SIZE + '&offset=' + taskDetailOffset));
   renderTaskDetailTurns(turns);
 }
 
 async function taskDetailPrev() {
   taskDetailOffset = Math.max(0, taskDetailOffset - PAGE_SIZE);
-  const turns = await fetchJson('/api/tasks/turns?' + taskDetailQs() + '&limit=' + PAGE_SIZE + '&offset=' + taskDetailOffset);
+  const turns = await enrichTurnsWithCost(await fetchJson('/api/tasks/turns?' + taskDetailQs() + '&limit=' + PAGE_SIZE + '&offset=' + taskDetailOffset));
   renderTaskDetailTurns(turns);
 }
 
@@ -1357,12 +1357,13 @@ async function showSession(id, returnTo) {
   document.getElementById('session-detail-stats').innerHTML = '<div class="stat-card" style="grid-column:1/-1"><div class="label">Loading...</div></div>';
   document.getElementById('session-detail-turns').innerHTML = '';
 
-  const [session, turns] = await Promise.all([
+  const [session, turns, subagents] = await Promise.all([
     fetchJson('/api/sessions/' + id),
     fetchJson('/api/sessions/' + id + '/turns'),
+    fetchJson('/api/sessions/' + id + '/subagents'),
   ]);
 
-  document.getElementById('session-detail-stats').innerHTML = [
+  const stats = [
     { label: 'Session ID', value: '<span class="session-id" onclick="copyText(\'' + session.id + '\')" title="Click to copy">' + shortId(session.id) + ' <span class="copy-icon">&#x2398;</span></span>' },
     { label: 'Project', value: '<span title="' + escHtml(session.project_path ?? '') + '">' + escHtml(basename(session.project_path)) + '</span>' },
     { label: 'Model', value: '<span style="font-family:var(--mono);font-size:13px">' + escHtml(session.model ?? '\u2014') + '</span>' },
@@ -1371,16 +1372,39 @@ async function showSession(id, returnTo) {
     { label: 'Input Tokens', value: fmtNum(session.total_input_tokens) },
     { label: 'Output Tokens', value: fmtNum(session.total_output_tokens) },
     { label: 'Cost', value: fmtCost(session.total_cost_usd) },
-  ].map(c =>
+  ];
+  if (subagents.length > 0) {
+    stats.push({ label: 'Agents', value: String(subagents.length) });
+  }
+  document.getElementById('session-detail-stats').innerHTML = stats.map(c =>
     '<div class="stat-card"><div class="label">' + c.label + '</div><div class="value" style="font-size:14px">' + c.value + '</div></div>'
   ).join('');
 
   const turnsDiv = document.getElementById('session-detail-turns');
-  if (!turns.length) {
+  let html = '';
+
+  if (subagents.length > 0) {
+    html += '<div style="margin-bottom:16px"><h3 style="font-size:13px;color:var(--text-dim);margin:0 0 8px">Agent Sub-Sessions</h3>' +
+      '<table class="data-table" style="width:100%"><thead><tr>' +
+      '<th>Agent Type</th><th>Duration</th><th>Turns</th><th>Started</th>' +
+      '</tr></thead><tbody>' +
+      subagents.map(s =>
+        '<tr class="clickable" onclick="showSession(\'' + s.id + '\', \'sessions\')">' +
+        '<td><span class="tag-pill">' + escHtml(s.agent_type ?? 'unknown') + '</span></td>' +
+        '<td>' + fmtDuration(s.total_duration_ms) + '</td>' +
+        '<td>' + (s.total_turns ?? 0) + '</td>' +
+        '<td title="' + fmtAbsolute(s.started_at) + '">' + fmtRelative(s.started_at) + '</td>' +
+        '</tr>'
+      ).join('') +
+      '</tbody></table></div>';
+  }
+
+  if (!turns.length && !subagents.length) {
     turnsDiv.innerHTML = '<div class="empty">No turns recorded.</div>';
     return;
   }
-  turnsDiv.innerHTML = turns.map((t, i) => renderTurnHtml(t, 'tc-' + i)).join('');
+  html += turns.map((t, i) => renderTurnHtml(t, 'tc-' + i)).join('');
+  turnsDiv.innerHTML = html;
 }
 
 // ── Shared turn rendering ──

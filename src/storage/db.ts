@@ -116,11 +116,23 @@ function migrate(db: Database.Database): void {
       last_synced_at TEXT
     );
   `);
+
+  // Additive migrations (safe to re-run; errors mean column already exists)
+  const addColumns = [
+    `ALTER TABLE sessions ADD COLUMN parent_session_id TEXT`,
+    `ALTER TABLE sessions ADD COLUMN agent_type TEXT`,
+  ];
+  for (const sql of addColumns) {
+    try { db.exec(sql); } catch { /* column already exists */ }
+  }
+  db.exec(`CREATE INDEX IF NOT EXISTS idx_sessions_parent ON sessions(parent_session_id)`);
 }
 
 export type SessionRow = {
   id: string;
   project_path: string | null;
+  parent_session_id: string | null;
+  agent_type: string | null;
   started_at: string;
   ended_at: string | null;
   total_input_tokens: number;

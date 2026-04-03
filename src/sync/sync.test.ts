@@ -104,6 +104,8 @@ describe("zozul sync e2e", () => {
     repo.upsertSession({
       id: "sess-001",
       project_path: "/projects/test",
+      parent_session_id: null,
+      agent_type: null,
       started_at: "2026-03-28T10:00:00Z",
       total_input_tokens: 100,
       total_output_tokens: 50,
@@ -249,6 +251,8 @@ describe("zozul sync e2e", () => {
     repo.upsertSession({
       id: "sess-002",
       project_path: null,
+      parent_session_id: null,
+      agent_type: null,
       started_at: "2026-03-28T11:00:00Z",
       total_input_tokens: 10,
       total_output_tokens: 10,
@@ -296,6 +300,8 @@ describe("zozul sync e2e", () => {
     repo.upsertSession({
       id: "sess-A",
       project_path: null,
+      parent_session_id: null,
+      agent_type: null,
       started_at: "2026-03-28T12:00:00Z",
       total_input_tokens: 10,
       total_output_tokens: 10,
@@ -330,6 +336,8 @@ describe("zozul sync e2e", () => {
     repo.upsertSession({
       id: "sess-B",
       project_path: "/new",
+      parent_session_id: null,
+      agent_type: null,
       started_at: "2026-03-28T13:00:00Z",
       total_input_tokens: 20,
       total_output_tokens: 20,
@@ -369,6 +377,8 @@ describe("zozul sync e2e", () => {
     repo.upsertSession({
       id: "sess-dry",
       project_path: null,
+      parent_session_id: null,
+      agent_type: null,
       started_at: "2026-03-28T14:00:00Z",
       total_input_tokens: 5,
       total_output_tokens: 5,
@@ -411,6 +421,8 @@ describe("zozul sync e2e", () => {
     repo.upsertSession({
       id: "sess-err",
       project_path: null,
+      parent_session_id: null,
+      agent_type: null,
       started_at: "2026-03-28T15:00:00Z",
       total_input_tokens: 10,
       total_output_tokens: 10,

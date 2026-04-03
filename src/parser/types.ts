@@ -54,6 +54,8 @@ export interface SessionEntry {
 export interface ParsedSession {
   sessionId: string;
   projectPath: string | null;
+  parentSessionId: string | null;
+  agentType: string | null;
   startedAt: string;
   endedAt: string | null;
   model: string | null;

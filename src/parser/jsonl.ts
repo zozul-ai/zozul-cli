@@ -23,8 +23,15 @@ const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\.
  * Discover all session JSONL files across all projects.
  * Files are stored directly in each project directory (not in a sessions/ subdir).
  */
-export function discoverSessionFiles(): { filePath: string; projectPath: string }[] {
-  const results: { filePath: string; projectPath: string }[] = [];
+export type DiscoveredFile = {
+  filePath: string;
+  projectPath: string;
+  parentSessionId?: string;
+  agentType?: string;
+};
+
+export function discoverSessionFiles(): DiscoveredFile[] {
+  const results: DiscoveredFile[] = [];
 
   if (!fs.existsSync(PROJECTS_DIR)) return results;
 
@@ -36,11 +43,37 @@ export function discoverSessionFiles(): { filePath: string; projectPath: string 
     const decodedProject = decodeProjectPath(projectDir);
 
     for (const file of fs.readdirSync(projectDirPath)) {
-      if (!UUID_RE.test(file)) continue;
-      results.push({
-        filePath: path.join(projectDirPath, file),
-        projectPath: decodedProject,
-      });
+      // Main session JSONL files
+      if (UUID_RE.test(file)) {
+        results.push({
+          filePath: path.join(projectDirPath, file),
+          projectPath: decodedProject,
+        });
+      }
+
+      // Check for subagents directory inside UUID-named session dirs
+      const uuidDirMatch = file.match(/^([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$/i);
+      if (uuidDirMatch) {
+        const subagentsDir = path.join(projectDirPath, file, "subagents");
+        if (fs.existsSync(subagentsDir)) {
+          const parentSessionId = uuidDirMatch[1];
+          for (const agentFile of fs.readdirSync(subagentsDir)) {
+            if (!agentFile.endsWith(".jsonl")) continue;
+            let agentType: string | undefined;
+            try {
+              const metaPath = path.join(subagentsDir, agentFile.replace(".jsonl", ".meta.json"));
+              const meta = JSON.parse(fs.readFileSync(metaPath, "utf-8"));
+              agentType = meta.agentType;
+            } catch { /* no meta or invalid JSON */ }
+            results.push({
+              filePath: path.join(subagentsDir, agentFile),
+              projectPath: decodedProject,
+              parentSessionId,
+              agentType,
+            });
+          }
+        }
+      }
     }
   }
 
@@ -57,6 +90,7 @@ export function discoverSessionFiles(): { filePath: string; projectPath: string 
 export async function parseSessionFile(
   filePath: string,
   projectPath?: string,
+  opts?: { parentSessionId?: string; agentType?: string },
 ): Promise<ParsedSession> {
   const entries = await readJsonlFile(filePath);
   const sessionId = path.basename(filePath, ".jsonl");
@@ -165,6 +199,8 @@ export async function parseSessionFile(
   return {
     sessionId,
     projectPath: projectPath ?? null,
+    parentSessionId: opts?.parentSessionId ?? null,
+    agentType: opts?.agentType ?? null,
     startedAt: startedAt ?? new Date().toISOString(),
     endedAt,
     model,
