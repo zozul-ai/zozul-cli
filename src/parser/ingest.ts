@@ -1,5 +1,5 @@
 import type { SessionRepo } from "../storage/repo.js";
-import { discoverSessionFiles, parseSessionFile } from "./jsonl.js";
+import { discoverSessionFiles, parseSessionFile, type DiscoveredFile } from "./jsonl.js";
 import type { ParsedSession } from "./types.js";
 import { getActiveContext } from "../context/index.js";
 
@@ -15,8 +15,8 @@ export async function ingestAllSessions(
   let ingested = 0;
   let skipped = 0;
 
-  for (const { filePath, projectPath } of files) {
-    const parsed = await parseSessionFile(filePath, projectPath);
+  for (const { filePath, projectPath, parentSessionId, agentType } of files) {
+    const parsed = await parseSessionFile(filePath, projectPath, { parentSessionId, agentType });
 
     if (!opts.force) {
       const existing = repo.getSession(parsed.sessionId);
@@ -40,9 +40,12 @@ export async function ingestSessionFile(
   repo: SessionRepo,
   filePath: string,
   projectPath?: string,
-  opts: { noTag?: boolean } = {},
+  opts: { noTag?: boolean; parentSessionId?: string; agentType?: string } = {},
 ): Promise<ParsedSession> {
-  const parsed = await parseSessionFile(filePath, projectPath);
+  const parsed = await parseSessionFile(filePath, projectPath, {
+    parentSessionId: opts.parentSessionId,
+    agentType: opts.agentType,
+  });
   persistSession(repo, parsed, opts);
   return parsed;
 }
@@ -51,6 +54,8 @@ function persistSession(repo: SessionRepo, parsed: ParsedSession, opts: { noTag?
   repo.upsertSession({
     id: parsed.sessionId,
     project_path: parsed.projectPath,
+    parent_session_id: parsed.parentSessionId,
+    agent_type: parsed.agentType,
     started_at: parsed.startedAt,
     ended_at: parsed.endedAt,
     total_input_tokens: parsed.totalInputTokens,

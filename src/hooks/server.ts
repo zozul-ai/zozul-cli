@@ -218,6 +218,13 @@ function handleApiRoute(url: string, repo: SessionRepo, res: http.ServerResponse
     return;
   }
 
+  const subagentsMatch = path.match(/^\/api\/sessions\/([^/]+)\/subagents$/);
+  if (subagentsMatch) {
+    const subs = repo.getSubSessions(subagentsMatch[1]);
+    sendJson(res, 200, subs);
+    return;
+  }
+
   if (path === "/api/metrics/tokens") {
     const { from, to, stepSeconds } = parseTimeRange(url);
     sendJson(res, 200, repo.getTokenTimeSeries(from, to, stepSeconds));

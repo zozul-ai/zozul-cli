@@ -30,9 +30,9 @@ export async function watchSessionFiles(opts: WatcherOptions): Promise<() => voi
   if (catchUp) {
     const files = discoverSessionFiles();
     let caught = 0;
-    for (const { filePath, projectPath } of files) {
+    for (const { filePath, projectPath, parentSessionId, agentType } of files) {
       try {
-        await ingestSessionFile(repo, filePath, projectPath);
+        await ingestSessionFile(repo, filePath, projectPath, { parentSessionId, agentType });
         caught++;
       } catch {
         // Ignore parse errors on individual files
@@ -61,7 +61,11 @@ export async function watchSessionFiles(opts: WatcherOptions): Promise<() => voi
       timers.delete(filePath);
       try {
         const projectPath = decodeProjectPath(filePath);
-        await ingestSessionFile(repo, filePath, projectPath ?? undefined);
+        const subagentInfo = extractSubagentInfo(filePath);
+        await ingestSessionFile(repo, filePath, projectPath ?? undefined, {
+          parentSessionId: subagentInfo?.parentSessionId,
+          agentType: subagentInfo?.agentType,
+        });
         if (verbose) {
           process.stderr.write(`[watcher] ingested: ${filePath}\n`);
         }
@@ -104,13 +108,34 @@ export async function watchSessionFiles(opts: WatcherOptions): Promise<() => voi
 }
 
 /**
+ * Extract parent session ID and agent type from a subagent file path.
+ * Path format: .../<parent-uuid>/subagents/<agent-id>.jsonl
+ */
+function extractSubagentInfo(filePath: string): { parentSessionId: string; agentType: string | undefined } | null {
+  const match = filePath.match(/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\/subagents\/([^/]+)\.jsonl$/i);
+  if (!match) return null;
+  const parentSessionId = match[1];
+  let agentType: string | undefined;
+  try {
+    const metaPath = filePath.replace(".jsonl", ".meta.json");
+    const meta = JSON.parse(fs.readFileSync(metaPath, "utf-8"));
+    agentType = meta.agentType;
+  } catch { /* missing or invalid meta */ }
+  return { parentSessionId, agentType };
+}
+
+/**
  * Extract the decoded project path from an absolute JSONL file path.
- * ~/.claude/projects/<encoded>/<uuid>.jsonl
- * where <encoded> has "/" replaced with "-".
+ * Handles both main sessions and subagent files:
+ *   ~/.claude/projects/<encoded>/<uuid>.jsonl
+ *   ~/.claude/projects/<encoded>/<uuid>/subagents/<agent-id>.jsonl
  */
 function decodeProjectPath(filePath: string): string | null {
-  // Match project dir directly containing the UUID file
-  const match = filePath.match(/projects\/([^/]+)\/[0-9a-f-]{36}\.jsonl$/i);
-  if (!match) return null;
-  return match[1].replace(/-/g, "/");
+  // Main session: projects/<encoded>/<uuid>.jsonl
+  const parentMatch = filePath.match(/projects\/([^/]+)\/[0-9a-f-]{36}\.jsonl$/i);
+  if (parentMatch) return parentMatch[1].replace(/-/g, "/");
+  // Subagent: projects/<encoded>/<uuid>/subagents/<agent-id>.jsonl
+  const subMatch = filePath.match(/projects\/([^/]+)\/[0-9a-f-]{36}\/subagents\/[^/]+\.jsonl$/i);
+  if (subMatch) return subMatch[1].replace(/-/g, "/");
+  return null;
 }

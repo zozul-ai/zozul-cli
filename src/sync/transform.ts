@@ -7,6 +7,8 @@ import type {
 export type ApiSession = {
   id: string;
   project_path: string | null;
+  parent_session_id: string | null;
+  agent_type: string | null;
   started_at: string;
   ended_at: string | null;
   total_input_tokens: number;
@@ -103,6 +105,8 @@ export function transformSession(row: SessionRow): ApiSession {
   return {
     id: row.id,
     project_path: row.project_path,
+    parent_session_id: row.parent_session_id,
+    agent_type: row.agent_type,
     started_at: row.started_at,
     ended_at: row.ended_at,
     total_input_tokens: row.total_input_tokens,

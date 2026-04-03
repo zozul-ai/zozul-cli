@@ -22,15 +22,17 @@ export class SessionRepo {
 
   upsertSession(session: Omit<SessionRow, "ended_at"> & { ended_at?: string | null }): void {
     this.db.prepare(`
-      INSERT INTO sessions (id, project_path, started_at, ended_at, total_input_tokens,
-        total_output_tokens, total_cache_read_tokens, total_cache_creation_tokens,
+      INSERT INTO sessions (id, project_path, parent_session_id, agent_type, started_at, ended_at,
+        total_input_tokens, total_output_tokens, total_cache_read_tokens, total_cache_creation_tokens,
         total_cost_usd, total_turns, total_duration_ms, model)
-      VALUES (@id, @project_path, @started_at, @ended_at, @total_input_tokens,
-        @total_output_tokens, @total_cache_read_tokens, @total_cache_creation_tokens,
+      VALUES (@id, @project_path, @parent_session_id, @agent_type, @started_at, @ended_at,
+        @total_input_tokens, @total_output_tokens, @total_cache_read_tokens, @total_cache_creation_tokens,
         @total_cost_usd, @total_turns, @total_duration_ms, @model)
       ON CONFLICT(id) DO UPDATE SET
         started_at    = MIN(started_at, @started_at),
         project_path  = COALESCE(@project_path, project_path),
+        parent_session_id = COALESCE(@parent_session_id, parent_session_id),
+        agent_type    = COALESCE(@agent_type, agent_type),
         ended_at      = COALESCE(@ended_at, ended_at),
         total_turns   = @total_turns,
         model         = COALESCE(@model, model),
@@ -45,6 +47,8 @@ export class SessionRepo {
     `).run({
       ...session,
       ended_at: session.ended_at ?? null,
+      parent_session_id: session.parent_session_id ?? null,
+      agent_type: session.agent_type ?? null,
     });
   }
 
@@ -179,25 +183,31 @@ export class SessionRepo {
   listSessions(limit = 50, offset = 0, from?: string, to?: string): SessionRow[] {
     if (from && to) {
       return this.db.prepare(`
-        SELECT * FROM sessions WHERE started_at >= ? AND started_at <= ? ORDER BY started_at DESC LIMIT ? OFFSET ?
+        SELECT * FROM sessions WHERE parent_session_id IS NULL AND started_at >= ? AND started_at <= ? ORDER BY started_at DESC LIMIT ? OFFSET ?
       `).all(from, to, limit, offset) as SessionRow[];
     }
     return this.db.prepare(`
-      SELECT * FROM sessions ORDER BY started_at DESC LIMIT ? OFFSET ?
+      SELECT * FROM sessions WHERE parent_session_id IS NULL ORDER BY started_at DESC LIMIT ? OFFSET ?
     `).all(limit, offset) as SessionRow[];
   }
 
   countSessions(from?: string, to?: string): number {
     if (from && to) {
-      const row = this.db.prepare(`SELECT COUNT(*) as n FROM sessions WHERE started_at >= ? AND started_at <= ?`).get(from, to) as { n: number };
+      const row = this.db.prepare(`SELECT COUNT(*) as n FROM sessions WHERE parent_session_id IS NULL AND started_at >= ? AND started_at <= ?`).get(from, to) as { n: number };
       return row.n;
     }
-    const row = this.db.prepare(`SELECT COUNT(*) as n FROM sessions`).get() as { n: number };
+    const row = this.db.prepare(`SELECT COUNT(*) as n FROM sessions WHERE parent_session_id IS NULL`).get() as { n: number };
     return row.n;
   }
 
   getSession(id: string): SessionRow | undefined {
     return this.db.prepare(`SELECT * FROM sessions WHERE id = ?`).get(id) as SessionRow | undefined;
+  }
+
+  getSubSessions(parentSessionId: string): SessionRow[] {
+    return this.db.prepare(`
+      SELECT * FROM sessions WHERE parent_session_id = ? ORDER BY started_at ASC
+    `).all(parentSessionId) as SessionRow[];
   }
 
   getSessionTurns(sessionId: string): TurnRow[] {
@@ -221,7 +231,7 @@ export class SessionRepo {
   getAggregateStats(from?: string, to?: string) {
     if (from && to) {
       return this.db.prepare(`
-        WITH fs AS (SELECT * FROM sessions WHERE started_at >= ? AND started_at <= ?),
+        WITH fs AS (SELECT * FROM sessions WHERE parent_session_id IS NULL AND started_at >= ? AND started_at <= ?),
              fh AS (SELECT * FROM hook_events WHERE timestamp >= ? AND timestamp <= ?)
         SELECT
           (SELECT COUNT(*)                       FROM fs) as total_sessions,
@@ -237,13 +247,13 @@ export class SessionRepo {
     }
     return this.db.prepare(`
       SELECT
-        (SELECT COUNT(*) FROM sessions) as total_sessions,
-        (SELECT SUM(total_input_tokens)          FROM sessions) as total_input_tokens,
-        (SELECT SUM(total_output_tokens)         FROM sessions) as total_output_tokens,
-        (SELECT SUM(total_cache_read_tokens)     FROM sessions) as total_cache_read_tokens,
-        (SELECT SUM(total_cost_usd)              FROM sessions) as total_cost_usd,
-        (SELECT SUM(total_turns)                 FROM sessions) as total_turns,
-        (SELECT SUM(total_duration_ms)           FROM sessions) as total_duration_ms,
+        (SELECT COUNT(*) FROM sessions WHERE parent_session_id IS NULL) as total_sessions,
+        (SELECT SUM(total_input_tokens)          FROM sessions WHERE parent_session_id IS NULL) as total_input_tokens,
+        (SELECT SUM(total_output_tokens)         FROM sessions WHERE parent_session_id IS NULL) as total_output_tokens,
+        (SELECT SUM(total_cache_read_tokens)     FROM sessions WHERE parent_session_id IS NULL) as total_cache_read_tokens,
+        (SELECT SUM(total_cost_usd)              FROM sessions WHERE parent_session_id IS NULL) as total_cost_usd,
+        (SELECT SUM(total_turns)                 FROM sessions WHERE parent_session_id IS NULL) as total_turns,
+        (SELECT SUM(total_duration_ms)           FROM sessions WHERE parent_session_id IS NULL) as total_duration_ms,
         (SELECT COUNT(*) FROM hook_events WHERE event_name = 'UserPromptSubmit') as total_user_prompts,
         (SELECT COUNT(*) FROM hook_events WHERE event_name = 'Stop') as total_interruptions
     `).get();
@@ -478,6 +488,7 @@ export class SessionRepo {
 
     // Only show real user turns (each row = one interaction block)
     conditions.push("t.is_real_user = 1");
+    conditions.push("t.session_id IN (SELECT id FROM sessions WHERE parent_session_id IS NULL)");
 
     const where = conditions.length > 0 ? "WHERE " + conditions.join(" AND ") : "";
     params.push(limit, offset);
@@ -602,7 +613,7 @@ export class SessionRepo {
    * Safe to call repeatedly — always produces correct values from append-only source data.
    */
   getTaskGroups(from?: string, to?: string): { tags: string; turn_count: number; human_interventions: number; total_duration_ms: number; total_cost_usd: number; last_seen: string }[] {
-    const timeFilter = from && to ? "\n    WHERE t.timestamp >= ? AND t.timestamp <= ?" : "";
+    const timeFilter = from && to ? " AND t.timestamp >= ? AND t.timestamp <= ?" : "";
     const params: unknown[] = from && to ? [from, to] : [];
 
     return this.db.prepare(`
@@ -620,7 +631,8 @@ export class SessionRepo {
         MAX(t.timestamp) as last_seen
       FROM turns t
       LEFT JOIN turn_tag_sets tts ON tts.turn_id = t.id
-      JOIN sessions s ON s.id = t.session_id${timeFilter}
+      JOIN sessions s ON s.id = t.session_id
+      WHERE s.parent_session_id IS NULL${timeFilter}
       GROUP BY COALESCE(tts.tag_set, 'Untagged')
       ORDER BY last_seen DESC
     `).all(...params) as { tags: string; turn_count: number; human_interventions: number; total_duration_ms: number; total_cost_usd: number; last_seen: string }[];
