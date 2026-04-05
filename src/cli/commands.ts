@@ -95,10 +95,6 @@ function doServe(opts: ServeOpts): Promise<void> {
       reject(err);
     });
 
-    // Recompute session costs from raw OTEL data to fix any accumulation drift
-    const fixed = repo.recomputeSessionCostsFromOtel();
-    if (fixed > 0 && opts.verbose) console.log(`Recomputed costs for ${fixed} sessions from OTEL data`);
-
     server.listen(opts.port, async () => {
       console.log(`zozul listening on http://localhost:${opts.port}`);
       console.log(`  Dashboard:     http://localhost:${opts.port}/dashboard`);
@@ -107,11 +103,25 @@ function doServe(opts: ServeOpts): Promise<void> {
       console.log(`  API:           http://localhost:${opts.port}/api/*`);
       console.log("\nPress Ctrl+C to stop.\n");
 
-      const stopWatcher = await watchSessionFiles({ repo, verbose: opts.verbose ?? false, catchUp: true });
+      // Run background startup tasks after server is bound and serving
+      const t0 = Date.now();
+
+      const fixed = repo.recomputeSessionCostsFromOtel();
+      console.log(`  recomputeCosts: ${Date.now() - t0}ms (${fixed} sessions fixed)`);
+
+      // Start watcher without awaiting — catchUp can be slow, server stays responsive
+      let stopWatcher = () => {};
+      watchSessionFiles({ repo, verbose: opts.verbose ?? false, catchUp: true }).then((stopFn) => {
+        stopWatcher = stopFn;
+        console.log(`  watchSessionFiles: ${Date.now() - t0}ms`);
+      });
 
       if (syncClient) {
-        if (opts.verbose) console.log("  Remote sync: enabled");
-        runSync(repo, syncClient, { verbose: opts.verbose ?? false }).catch(() => {});
+        console.log("  Remote sync: enabled");
+        const t2 = Date.now();
+        runSync(repo, syncClient, { verbose: opts.verbose ?? false })
+          .then(() => console.log(`  runSync: ${Date.now() - t2}ms`))
+          .catch(() => {});
       }
 
       process.on("SIGINT", () => {
