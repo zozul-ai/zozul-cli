@@ -257,31 +257,41 @@ export class SessionRepo {
   getAggregateStats(from?: string, to?: string) {
     if (from && to) {
       return this.db.prepare(`
-        WITH fs AS (SELECT * FROM sessions WHERE parent_session_id IS NULL AND started_at >= ? AND started_at <= ?),
-             fh AS (SELECT * FROM hook_events WHERE timestamp >= ? AND timestamp <= ?)
+        WITH ft AS (
+          SELECT t.* FROM turns t
+          JOIN sessions s ON s.id = t.session_id
+          WHERE s.parent_session_id IS NULL AND t.timestamp >= ? AND t.timestamp <= ?
+        ),
+        fh AS (SELECT * FROM hook_events WHERE timestamp >= ? AND timestamp <= ?)
         SELECT
-          (SELECT COUNT(*)                       FROM fs) as total_sessions,
-          (SELECT SUM(total_input_tokens)        FROM fs) as total_input_tokens,
-          (SELECT SUM(total_output_tokens)       FROM fs) as total_output_tokens,
-          (SELECT SUM(total_cache_read_tokens)   FROM fs) as total_cache_read_tokens,
-          (SELECT SUM(total_cost_usd)            FROM fs) as total_cost_usd,
-          (SELECT SUM(total_turns)               FROM fs) as total_turns,
-          (SELECT SUM(total_duration_ms)         FROM fs) as total_duration_ms,
+          COUNT(DISTINCT ft.session_id)        as total_sessions,
+          SUM(ft.input_tokens)                 as total_input_tokens,
+          SUM(ft.output_tokens)                as total_output_tokens,
+          SUM(ft.cache_read_tokens)            as total_cache_read_tokens,
+          SUM(ft.cost_usd)                     as total_cost_usd,
+          COUNT(*)                             as total_turns,
+          SUM(ft.duration_ms)                  as total_duration_ms,
+          SUM(CASE WHEN ft.is_real_user = 1 THEN 1 ELSE 0 END) as total_user_turns,
           (SELECT COUNT(*) FROM fh WHERE event_name = 'UserPromptSubmit') as total_user_prompts,
           (SELECT COUNT(*) FROM fh WHERE event_name = 'Stop') as total_interruptions
+        FROM ft
       `).get(from, to, from, to);
     }
     return this.db.prepare(`
       SELECT
-        (SELECT COUNT(*) FROM sessions WHERE parent_session_id IS NULL) as total_sessions,
-        (SELECT SUM(total_input_tokens)          FROM sessions WHERE parent_session_id IS NULL) as total_input_tokens,
-        (SELECT SUM(total_output_tokens)         FROM sessions WHERE parent_session_id IS NULL) as total_output_tokens,
-        (SELECT SUM(total_cache_read_tokens)     FROM sessions WHERE parent_session_id IS NULL) as total_cache_read_tokens,
-        (SELECT SUM(total_cost_usd)              FROM sessions WHERE parent_session_id IS NULL) as total_cost_usd,
-        (SELECT SUM(total_turns)                 FROM sessions WHERE parent_session_id IS NULL) as total_turns,
-        (SELECT SUM(total_duration_ms)           FROM sessions WHERE parent_session_id IS NULL) as total_duration_ms,
+        COUNT(DISTINCT t.session_id)       as total_sessions,
+        SUM(t.input_tokens)                as total_input_tokens,
+        SUM(t.output_tokens)               as total_output_tokens,
+        SUM(t.cache_read_tokens)           as total_cache_read_tokens,
+        SUM(t.cost_usd)                    as total_cost_usd,
+        COUNT(*)                           as total_turns,
+        SUM(t.duration_ms)                 as total_duration_ms,
+        SUM(CASE WHEN t.is_real_user = 1 THEN 1 ELSE 0 END) as total_user_turns,
         (SELECT COUNT(*) FROM hook_events WHERE event_name = 'UserPromptSubmit') as total_user_prompts,
         (SELECT COUNT(*) FROM hook_events WHERE event_name = 'Stop') as total_interruptions
+      FROM turns t
+      JOIN sessions s ON s.id = t.session_id
+      WHERE s.parent_session_id IS NULL
     `).get();
   }
 
