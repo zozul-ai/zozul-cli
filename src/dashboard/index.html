@@ -1021,15 +1021,7 @@ function toggleDataSource() {
 async function fetchJson(path, opts = {}) {
   if (dataSource === 'remote' && typeof ZOZUL_CONFIG !== 'undefined') {
     try {
-      let remotePath = path.replace('/api/', '/');
-      // Ensure trailing slash before query params to avoid 307 redirects (which drop headers)
-      const qIdx = remotePath.indexOf('?');
-      if (qIdx === -1) {
-        if (!remotePath.endsWith('/')) remotePath += '/';
-      } else {
-        const base = remotePath.slice(0, qIdx);
-        if (!base.endsWith('/')) remotePath = base + '/' + remotePath.slice(qIdx);
-      }
+      const remotePath = path.replace('/api/', '/');
       const url = ZOZUL_CONFIG.remote.baseUrl + remotePath;
       const res = await fetch(url, { ...opts, headers: { 'X-API-Key': ZOZUL_CONFIG.remote.apiKey, ...(opts.headers || {}) } });
       if (res.ok) return res.status === 204 ? null : res.json();

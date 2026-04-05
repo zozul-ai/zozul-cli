@@ -18,10 +18,10 @@ const require = createRequire(import.meta.url);
 const { version: PKG_VERSION } = require("../../package.json");
 
 function envPort(): string {
-  return process.env.ZOZUL_PORT ?? "7890";
+  return process.env.ZOZUL_PORT ?? "7891";
 }
 function envOtelEndpoint(): string {
-  return process.env.OTEL_ENDPOINT ?? "http://localhost:7890";
+  return process.env.OTEL_ENDPOINT ?? "http://localhost:7891";
 }
 function envOtelProtocol(): string {
   return process.env.OTEL_PROTOCOL ?? "http/json";
@@ -144,11 +144,12 @@ export function buildCli(): Command {
   program
     .command("serve")
     .description("Start the hooks HTTP server to receive real-time events from Claude Code")
-    .option("-p, --port <port>", "Port to listen on", envPort())
+    .option("-p, --port <port>", "Port to listen on")
     .option("-v, --verbose", "Print events to stderr as they arrive")
     .option("--dev", "Sync to local dev backend (localhost:8000)")
     .action(async (opts) => {
-      const port = parseInt(opts.port, 10);
+      const defaultPort = opts.dev ? "7890" : envPort();
+      const port = parseInt(opts.port ?? defaultPort, 10);
       await doServe({ port, verbose: opts.verbose || envVerbose(), dev: opts.dev });
     });
 
