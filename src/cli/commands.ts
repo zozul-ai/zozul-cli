@@ -103,26 +103,29 @@ function doServe(opts: ServeOpts): Promise<void> {
       console.log(`  API:           http://localhost:${opts.port}/api/*`);
       console.log("\nPress Ctrl+C to stop.\n");
 
-      // Run background startup tasks after server is bound and serving
-      const t0 = Date.now();
-
-      const fixed = repo.recomputeSessionCostsFromOtel();
-      console.log(`  recomputeCosts: ${Date.now() - t0}ms (${fixed} sessions fixed)`);
-
-      // Start watcher without awaiting — catchUp can be slow, server stays responsive
       let stopWatcher = () => {};
-      watchSessionFiles({ repo, verbose: opts.verbose ?? false, catchUp: true }).then((stopFn) => {
-        stopWatcher = stopFn;
-        console.log(`  watchSessionFiles: ${Date.now() - t0}ms`);
-      });
 
-      if (syncClient) {
-        console.log("  Remote sync: enabled");
-        const t2 = Date.now();
-        runSync(repo, syncClient, { verbose: opts.verbose ?? false })
-          .then(() => console.log(`  runSync: ${Date.now() - t2}ms`))
-          .catch(() => {});
-      }
+      // Defer all startup work so the event loop can serve requests immediately
+      setTimeout(async () => {
+        const t0 = Date.now();
+
+        // recomputeCosts is synchronous — runs once deferred so first requests aren't blocked
+        const fixed = repo.recomputeSessionCostsFromOtel();
+        console.log(`  recomputeCosts: ${Date.now() - t0}ms (${fixed} sessions fixed)`);
+
+        watchSessionFiles({ repo, verbose: opts.verbose ?? false, catchUp: true }).then((stopFn) => {
+          stopWatcher = stopFn;
+          console.log(`  watchSessionFiles: ${Date.now() - t0}ms`);
+        });
+
+        if (syncClient) {
+          console.log("  Remote sync: enabled");
+          const t2 = Date.now();
+          runSync(repo, syncClient, { verbose: opts.verbose ?? false })
+            .then(() => console.log(`  runSync: ${Date.now() - t2}ms`))
+            .catch(() => {});
+        }
+      }, 0);
 
       process.on("SIGINT", () => {
         stopWatcher();
