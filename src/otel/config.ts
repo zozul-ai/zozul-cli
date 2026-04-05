@@ -20,7 +20,7 @@ export interface OtelConfig {
 }
 
 const DEFAULT_CONFIG: OtelConfig = {
-  endpoint: "http://localhost:7890",
+  endpoint: "http://localhost:7891",
   protocol: "http/json",
   logUserPrompts: true,
   logToolDetails: true,
