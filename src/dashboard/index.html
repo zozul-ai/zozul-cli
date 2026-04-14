@@ -1164,6 +1164,8 @@ function timeQueryString() {
   return 'from=' + encodeURIComponent(from) + '&to=' + encodeURIComponent(now.toISOString());
 }
 
+
+
 function chartStepForWindow() {
   return currentTimeWindow === '1d' ? '1h' : '1d';
 }
